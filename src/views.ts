@@ -25,6 +25,13 @@ const css = raw(`
   .hint { font-weight:400; color:var(--muted); font-size:14px } .row { display:flex; gap:12px } .row > * { flex:1 }
   .checks label { display:inline-flex; gap:6px; align-items:center; margin:4px 16px 4px 0; font-weight:400 }
   input[type=file] { margin:8px 0 }
+  .bar { height:8px; background:var(--line); border-radius:4px; overflow:hidden; margin:16px 0 8px }
+  .bar > div { height:100%; width:0; background:var(--accent); transition:width .3s ease }
+  .steps { list-style:none; padding:0; margin:0 0 8px; font-size:15px }
+  .steps li { color:var(--muted); padding:2px 0 } .steps li::before { content:"○ " }
+  .steps li.active { color:var(--fg); font-weight:600 } .steps li.active::before { content:"→ " }
+  .steps li.done { color:#1f9d55 } .steps li.done::before { content:"✓ " }
+  button:disabled { opacity:.6; cursor:default }
 `);
 
 export function layout(title: string, body: Html) {
@@ -193,12 +200,89 @@ const SENIORITY_LABELS: Record<(typeof SENIORITY)[number], string> = {
 };
 
 function uploadForm(hasResume = false) {
-  return html`<form method="post" action="/app/cv" enctype="multipart/form-data">
+  return html`<form method="post" action="/app/cv" enctype="multipart/form-data" data-progress="upload">
     <input type="file" name="cv" accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document" required />
     <p class="muted" style="font-size:14px">PDF или DOCX до 5 МБ. Заполнение анкеты занимает до минуты.</p>
     <button type="submit">${hasResume ? "Загрузить новое резюме" : "Загрузить резюме"}</button>
   </form>`;
 }
+
+/**
+ * Прогресс разбора CV. Без JS формы работают как обычно; с JS отправляем их через XHR:
+ * загрузка файла — настоящий процент, чтение и заполнение — по времени (сервер отвечает одним ответом),
+ * полоса не доходит до конца, пока сервер не ответил.
+ */
+const progressBlock = html`<div id="cv-progress" hidden>
+    <div class="bar"><div id="cv-bar"></div></div>
+    <ol class="steps">
+      <li data-step="upload">Загружаем файл</li>
+      <li data-step="read">Читаем резюме</li>
+      <li data-step="fill">Заполняем анкету</li>
+      <li data-step="done">Готово</li>
+    </ol>
+    <p class="muted" style="font-size:14px">Обычно до минуты. Не закрывайте страницу.</p>
+  </div>
+  <script>${raw(`
+(() => {
+  const box = document.getElementById("cv-progress");
+  const bar = document.getElementById("cv-bar");
+  const steps = [...box.querySelectorAll("[data-step]")];
+  let pct = 0, timer = null;
+  const setPct = (v) => { pct = Math.max(pct, Math.min(100, v)); bar.style.width = pct + "%"; };
+  const setStep = (name) => {
+    const i = steps.findIndex((s) => s.dataset.step === name);
+    steps.forEach((s, j) => { s.className = j < i ? "done" : j === i ? "active" : ""; });
+  };
+  // После загрузки: 20→45% «читаем» за ~5 с, дальше «заполняем», плавно к 95% (за минуту ~90%).
+  const processing = () => {
+    if (timer) return;
+    setPct(20);
+    const t0 = Date.now();
+    setStep("read");
+    timer = setInterval(() => {
+      const s = (Date.now() - t0) / 1000;
+      if (s < 5) setPct(20 + s * 5);
+      else { setStep("fill"); setPct(45 + 50 * (1 - Math.exp(-(s - 5) / 25))); }
+    }, 250);
+  };
+  const finish = (xhr) => {
+    clearInterval(timer);
+    if (xhr.status === 200 && xhr.responseURL && new URL(xhr.responseURL).pathname === "/app/profile") {
+      setStep("done"); setPct(100);
+      setTimeout(() => location.assign(xhr.responseURL), 300);
+    } else if (xhr.responseText) {
+      document.open(); document.write(xhr.responseText); document.close();
+    } else {
+      location.reload();
+    }
+  };
+  document.querySelectorAll("form[data-progress]").forEach((form) => {
+    form.addEventListener("submit", (e) => {
+      if (!window.FormData || !window.XMLHttpRequest) return;
+      e.preventDefault();
+      document.querySelectorAll("form[data-progress] button").forEach((b) => (b.disabled = true));
+      box.hidden = false; pct = 0; timer = null; setPct(0);
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", form.action);
+      xhr.onload = () => finish(xhr);
+      xhr.onerror = () => { clearInterval(timer); location.reload(); };
+      if (form.dataset.progress === "upload") {
+        setStep("upload");
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) setPct((ev.loaded / ev.total) * 20);
+          if (ev.lengthComputable && ev.loaded >= ev.total) processing();
+        };
+        xhr.upload.onload = processing;
+        // если браузер не сообщает о загрузке (бывает с маленькими файлами), не стоим на месте
+        setTimeout(processing, 2000);
+      } else {
+        steps[0].hidden = true; processing();
+      }
+      xhr.send(new FormData(form));
+    });
+  });
+})();
+`)}</script>`;
 
 export function profilePage(
   stored: StoredProfile | null,
@@ -225,7 +309,7 @@ export function profilePage(
           <span class="muted">(${Math.max(1, Math.round(resume.size / 1024))} КБ)</span></p>
         ${stored?.parseError ? html`<p class="warn">${stored.parseError}</p>` : ""}
         ${stored?.source === "ai" && !stored.parseError ? html`<p class="ok">Анкета заполнена по резюме. Проверьте и поправьте.</p>` : ""}
-        <form method="post" action="/app/profile/refill"><button class="link" type="submit">Заполнить анкету по резюме заново</button></form>
+        <form method="post" action="/app/profile/refill" data-progress="refill"><button class="link" type="submit">Заполнить анкету по резюме заново</button></form>
         <hr style="border:0;border-top:1px solid var(--line);margin:16px 0" />
         ${uploadForm(true)}`
     : uploadForm();
@@ -237,7 +321,7 @@ export function profilePage(
       <p class="muted">По анкете мы подбираем вакансии и пишем письма. Ничего не придумываем: только то, что здесь.</p>
       ${opts.error ? html`<p class="warn">${opts.error}</p>` : ""}
       ${opts.saved ? html`<p class="ok">Анкета сохранена.</p>` : ""}
-      <div class="card"><h2 style="margin-top:0">Резюме</h2>${resumeBlock}</div>
+      <div class="card"><h2 style="margin-top:0">Резюме</h2>${resumeBlock}${progressBlock}</div>
       ${html`<form method="post" action="/app/profile" class="card">
             <h2 style="margin-top:0">Кто вы</h2>
             ${text("full_name", "Имя и фамилия", p?.full_name)}
