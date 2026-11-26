@@ -25,6 +25,19 @@ import { CvError, latestResume, loadResume, readCv, storeResume } from "./lib/cv
 import { loginMail, sendMail } from "./lib/email";
 import { hideMatch, listMatches, runJobsCron } from "./lib/jobs/pipeline";
 import {
+  DAILY_LETTER_LIMIT,
+  LetterError,
+  draftLetter,
+  getApplication,
+  getMatchDetail,
+  lettersToday,
+  markSent,
+  markSkipped,
+  recentCompanyApplication,
+  saveDraft,
+  updateDraft,
+} from "./lib/letters";
+import {
   ProfileExtractError,
   emptyProfile,
   extractProfile,
@@ -39,6 +52,7 @@ import {
   errorPage,
   invalidLinkPage,
   landingPage,
+  matchPage,
   matchesPage,
   privacyPage,
   profilePage,
@@ -124,6 +138,74 @@ app.get("/app/matches", async (c) => {
 app.post("/app/matches/:seq/hide", async (c) => {
   const seq = Number(c.req.param("seq"));
   if (Number.isInteger(seq)) await hideMatch(c.env.DB, c.get("user").id, seq);
+  return c.redirect("/app/matches", 303);
+});
+
+// --- Вакансия и письмо-отклик (письма — только с активной подпиской) ---
+
+const seqParam = (v: string) => {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
+};
+
+app.get("/app/matches/:seq", async (c) => {
+  const user = c.get("user");
+  const seq = seqParam(c.req.param("seq"));
+  const match = seq ? await getMatchDetail(c.env.DB, user.id, seq) : null;
+  if (!seq || !match) return c.redirect("/app/matches");
+  const [application, active, recent] = await Promise.all([
+    getApplication(c.env.DB, user.id, seq),
+    hasActiveSubscription(c.env.DB, user.id),
+    recentCompanyApplication(c.env.DB, user.id, match.company, seq),
+  ]);
+  const error = c.req.query("error");
+  return c.html(matchPage(match, application, active, { recent, error, saved: c.req.query("saved") === "1" }));
+});
+
+app.post("/app/matches/:seq/letter", async (c) => {
+  const user = c.get("user");
+  const seq = seqParam(c.req.param("seq"));
+  const back = (q = "") => c.redirect(`/app/matches/${seq}${q}`, 303);
+  const match = seq ? await getMatchDetail(c.env.DB, user.id, seq) : null;
+  if (!seq || !match) return c.redirect("/app/matches", 303);
+  if (!(await hasActiveSubscription(c.env.DB, user.id))) return back();
+  const current = await getApplication(c.env.DB, user.id, seq);
+  if (current?.status === "sent") return back();
+  if ((await lettersToday(c.env.DB, user.id)) >= DAILY_LETTER_LIMIT) return back("?error=limit");
+  const profile = await getProfile(c.env.DB, user.id);
+  if (!profile) return c.redirect("/app/profile", 303);
+  try {
+    await saveDraft(c.env.DB, user.id, match, await draftLetter(c.env, profile.profile, match));
+  } catch (e) {
+    if (!(e instanceof LetterError)) console.error("[letters] draft failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
+    return back("?error=draft");
+  }
+  return back();
+});
+
+app.post("/app/matches/:seq/application", async (c) => {
+  const user = c.get("user");
+  const seq = seqParam(c.req.param("seq"));
+  if (!seq) return c.redirect("/app/matches", 303);
+  const form = await c.req.parseBody();
+  const to = String(form.to_email ?? "").trim().toLowerCase();
+  const subject = String(form.subject ?? "").trim().slice(0, 200);
+  const body = String(form.body ?? "").trim().slice(0, 5000);
+  if (to && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(to)) return c.redirect(`/app/matches/${seq}?error=email`, 303);
+  if (!subject || !body) return c.redirect(`/app/matches/${seq}?error=empty`, 303);
+  await updateDraft(c.env.DB, user.id, seq, { to_email: to || null, subject, body });
+  return c.redirect(`/app/matches/${seq}?saved=1`, 303);
+});
+
+app.post("/app/matches/:seq/sent", async (c) => {
+  const seq = seqParam(c.req.param("seq"));
+  if (seq) await markSent(c.env.DB, c.get("user").id, seq, "manual");
+  return c.redirect(seq ? `/app/matches/${seq}` : "/app/matches", 303);
+});
+
+app.post("/app/matches/:seq/skip", async (c) => {
+  const seq = seqParam(c.req.param("seq"));
+  if (seq) await markSkipped(c.env.DB, c.get("user").id, seq);
   return c.redirect("/app/matches", 303);
 });
 

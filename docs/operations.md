@@ -80,7 +80,7 @@ npx wrangler d1 migrations apply otklikator-prod --remote --env production
 ```
 
 Текущие миграции: `0001_init` (пользователи, вход, подписки), `0002_profile` (CV и анкета),
-`0003_vacancies` (вакансии, совпадения, журнал фидов), `0004_feed_sources` (расписание источников).
+`0003_vacancies` (вакансии, совпадения, журнал фидов), `0004_feed_sources` (расписание источников), `0005_applications` (письма-отклики).
 
 ## Локальный запуск
 
