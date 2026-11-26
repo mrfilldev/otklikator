@@ -249,7 +249,7 @@ export default {
   /** Cron Triggers (wrangler.toml → [triggers]): сбор вакансий из фидов и подбор по анкетам. */
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
-      runJobsCron(env.DB).catch((e) => console.error("[jobs] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
+      runJobsCron(env.DB, { notify: (mail) => sendMail(env, mail) }).catch((e) => console.error("[jobs] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
     );
   },
 } satisfies ExportedHandler<Env>;

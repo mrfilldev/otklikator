@@ -2,18 +2,26 @@
  * Cron-конвейер: собрать вакансии из части источников → сохранить с дедупом → посчитать подбор для людей с анкетой.
  *
  * Лимиты Workers: подзапросов (fetch) и запросов к D1 на один запуск немного, поэтому
- *  - источники обходим по кругу, по FEEDS_PER_RUN за запуск (курсор в feed_state);
+ *  - у каждого источника своя частота (everyHours, как в рутинах resume: ~5 раз в сутки, ATS-доски 4, HN 1),
+ *    за запуск берём не больше MAX_FEEDS_PER_RUN самых «просроченных» (состояние в feed_sources);
+ *  - на 429/403 источник уходит на паузу: сутки, при повторе вдвое дольше, максимум неделя;
+ *  - после трёх неудач подряд — одно письмо владельцу;
  *  - вставки делаем одним запросом на пачку через json_each (а не по строке на вакансию);
  *  - вакансии для подбора грузим один раз на всех пользователей.
  */
 import { now } from "../../env";
+import type { Mail } from "../email";
 import { ProfileSchema, emptyProfile, type Profile } from "../profile";
 import { MIN_SCORE, scoreVacancy } from "./score";
-import { FEED_TASKS, httpFetcher, type FeedTask, type Fetcher, type RawVacancy } from "./sources";
+import { FEED_TASKS, HttpError, httpFetcher, type FeedTask, type Fetcher, type RawVacancy } from "./sources";
 import { fingerprint } from "./text";
 
-export const FEEDS_PER_RUN = 12;
+/** Потолок на запуск Cron (раз в 20 минут). В среднем источников «к сроку» меньше: ~85 источников × ~4,5 раза в сутки / 72 запуска ≈ 5. */
+export const MAX_FEEDS_PER_RUN = 12;
 const FEED_CONCURRENCY = 6;
+const FAILS_TO_ALERT = 3;
+const PAUSE_BASE = 86400;
+const PAUSE_MAX = 7 * 86400;
 /** Окно свежести: старше — не берём из фидов и не подбираем впервые. */
 export const FRESH_DAYS = 14;
 /** Сколько держим вакансию после того, как она пропала из фидов. */
@@ -83,23 +91,32 @@ export async function saveVacancies(db: D1Database, items: RawVacancy[], ts = no
   return inserted;
 }
 
-async function getState(db: D1Database, key: string): Promise<string | null> {
-  const r = await db.prepare("SELECT value FROM feed_state WHERE key = ?").bind(key).first<{ value: string }>();
-  return r?.value ?? null;
-}
-async function setState(db: D1Database, key: string, value: string): Promise<void> {
-  await db
-    .prepare("INSERT INTO feed_state (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at")
-    .bind(key, value, now())
-    .run();
-}
-
 // ---------------------------------------------------------------------------
 // Сбор
 
 export interface CollectReport {
   tasks: { task: string; fetched: number; inserted: number; error?: string }[];
   inserted: number;
+  /** Источники, которые только что упали FAILS_TO_ALERT раз подряд (про них пишем владельцу). */
+  alerts: string[];
+}
+
+interface SourceRow {
+  task: string;
+  next_run_at: number;
+  fails: number;
+  blocks: number;
+  paused_until: number | null;
+  last_ok_at: number | null;
+  last_error: string | null;
+  alerted_at: number | null;
+}
+
+/** Небольшой разброс, чтобы источники с одной частотой не собирались в один запуск. */
+function jitter(key: string, ts: number, span: number): number {
+  let h = 0;
+  for (const ch of `${key}:${Math.floor(ts / 3600)}`) h = (h * 31 + ch.charCodeAt(0)) | 0;
+  return Math.abs(h) % Math.max(1, Math.floor(span));
 }
 
 export async function collect(
@@ -107,43 +124,93 @@ export async function collect(
   opts: { get?: Fetcher; tasks?: FeedTask[]; perRun?: number; ts?: number } = {},
 ): Promise<CollectReport> {
   const all = opts.tasks ?? FEED_TASKS;
-  const perRun = Math.min(opts.perRun ?? FEEDS_PER_RUN, all.length);
   const get = opts.get ?? httpFetcher;
   const ts = opts.ts ?? now();
   const since = ts - FRESH_DAYS * 86400;
 
-  const cursor = Number((await getState(db, "feed_cursor")) ?? 0) % all.length || 0;
-  const slice = Array.from({ length: perRun }, (_, i) => all[(cursor + i) % all.length]);
+  const rows = (await db.prepare("SELECT * FROM feed_sources").all<SourceRow>()).results;
+  const state = new Map(rows.map((r) => [r.task, r]));
+  const due = all
+    .map((t) => ({ t, s: state.get(t.key) }))
+    .filter(({ s }) => !s || (s.next_run_at <= ts && (s.paused_until ?? 0) <= ts))
+    .sort((a, b) => (a.s?.next_run_at ?? 0) - (b.s?.next_run_at ?? 0))
+    .slice(0, opts.perRun ?? MAX_FEEDS_PER_RUN);
 
-  const results: { task: string; items: RawVacancy[]; error?: string }[] = [];
-  for (let i = 0; i < slice.length; i += FEED_CONCURRENCY) {
-    const part = slice.slice(i, i + FEED_CONCURRENCY);
+  const results: { t: FeedTask; prev?: SourceRow; items: RawVacancy[]; error?: unknown }[] = [];
+  for (let i = 0; i < due.length; i += FEED_CONCURRENCY) {
     const done = await Promise.all(
-      part.map(async (t) => {
+      due.slice(i, i + FEED_CONCURRENCY).map(async ({ t, s }) => {
         try {
-          return { task: t.key, items: await t.run(get, since) };
-        } catch (e) {
-          return { task: t.key, items: [], error: (e instanceof Error ? e.message : String(e)).slice(0, 200) };
+          return { t, prev: s, items: await t.run(get, since) };
+        } catch (error) {
+          return { t, prev: s, items: [], error };
         }
       }),
     );
     results.push(...done);
   }
 
-  const report: CollectReport = { tasks: [], inserted: 0 };
+  const report: CollectReport = { tasks: [], inserted: 0, alerts: [] };
+  const next: SourceRow[] = [];
   for (const r of results) {
     const inserted = r.items.length ? await saveVacancies(db, r.items, ts) : 0;
     report.inserted += inserted;
-    report.tasks.push({ task: r.task, fetched: r.items.length, inserted, ...(r.error ? { error: r.error } : {}) });
+    const every = r.t.everyHours * 3600;
+    if (r.error === undefined) {
+      report.tasks.push({ task: r.t.key, fetched: r.items.length, inserted });
+      // −5 минут, чтобы источник с частотой «раз в 5 ч» не съезжал на лишний 20-минутный запуск.
+      next.push({ task: r.t.key, next_run_at: ts + every - 300 + jitter(r.t.key, ts, every * 0.1), fails: 0, blocks: 0, paused_until: null, last_ok_at: ts, last_error: null, alerted_at: null });
+      continue;
+    }
+    const msg = (r.error instanceof Error ? r.error.message : String(r.error)).slice(0, 200);
+    report.tasks.push({ task: r.t.key, fetched: 0, inserted: 0, error: msg });
+    const fails = (r.prev?.fails ?? 0) + 1;
+    const blocked = r.error instanceof HttpError && (r.error.status === 429 || r.error.status === 403);
+    const blocks = blocked ? (r.prev?.blocks ?? 0) + 1 : 0;
+    let pausedUntil: number | null = null;
+    if (blocked) {
+      const retryAfter = Number((r.error as HttpError).retryAfter);
+      const pause = Math.min(PAUSE_MAX, Math.max(PAUSE_BASE * 2 ** (blocks - 1), Number.isFinite(retryAfter) ? retryAfter : 0));
+      pausedUntil = ts + pause;
+    }
+    let alertedAt = r.prev?.alerted_at ?? null;
+    if (fails >= FAILS_TO_ALERT && alertedAt === null) {
+      alertedAt = ts;
+      report.alerts.push(`${r.t.key}: ${msg} (${fails} раза подряд${blocked ? ", пауза до " + new Date(pausedUntil! * 1000).toISOString().slice(0, 16).replace("T", " ") + " UTC" : ""})`);
+    }
+    next.push({
+      task: r.t.key,
+      next_run_at: pausedUntil ?? ts + every,
+      fails,
+      blocks,
+      paused_until: pausedUntil,
+      last_ok_at: r.prev?.last_ok_at ?? null,
+      last_error: msg,
+      alerted_at: alertedAt,
+    });
   }
-  await db
-    .prepare(
-      `INSERT INTO feed_runs (task, fetched, inserted, error, ran_at)
-       SELECT j.value ->> 'task', j.value ->> 'fetched', j.value ->> 'inserted', j.value ->> 'error', ?2 FROM json_each(?1) AS j`,
-    )
-    .bind(JSON.stringify(report.tasks), ts)
-    .run();
-  await setState(db, "feed_cursor", String((cursor + perRun) % all.length));
+
+  if (results.length) {
+    await db.batch([
+      db
+        .prepare(
+          `INSERT INTO feed_runs (task, fetched, inserted, error, ran_at)
+           SELECT j.value ->> 'task', j.value ->> 'fetched', j.value ->> 'inserted', j.value ->> 'error', ?2 FROM json_each(?1) AS j`,
+        )
+        .bind(JSON.stringify(report.tasks), ts),
+      db
+        .prepare(
+          `INSERT INTO feed_sources (task, next_run_at, fails, blocks, paused_until, last_ok_at, last_error, alerted_at, updated_at)
+           SELECT j.value ->> 'task', j.value ->> 'next_run_at', j.value ->> 'fails', j.value ->> 'blocks', j.value ->> 'paused_until',
+                  j.value ->> 'last_ok_at', j.value ->> 'last_error', j.value ->> 'alerted_at', ?2
+           FROM json_each(?1) AS j WHERE true
+           ON CONFLICT(task) DO UPDATE SET next_run_at = excluded.next_run_at, fails = excluded.fails, blocks = excluded.blocks,
+             paused_until = excluded.paused_until, last_ok_at = excluded.last_ok_at, last_error = excluded.last_error,
+             alerted_at = excluded.alerted_at, updated_at = excluded.updated_at`,
+        )
+        .bind(JSON.stringify(next), ts),
+    ]);
+  }
   return report;
 }
 
@@ -292,8 +359,25 @@ export async function cleanup(db: D1Database, ts = now()): Promise<void> {
   ]);
 }
 
-export async function runJobsCron(db: D1Database, opts: { get?: Fetcher } = {}) {
+/** Кому писать, когда источник падает три раза подряд (адрес поддержки из подвала сайта). */
+export const ALERT_EMAIL = "mrfillippovvv@gmail.com";
+
+export function feedAlertMail(alerts: string[]): Mail {
+  return {
+    to: ALERT_EMAIL,
+    subject: `Otklikator: ${alerts.length === 1 ? "источник вакансий не отвечает" : `${alerts.length} источника вакансий не отвечают`}`,
+    text:
+      `Эти источники упали ${FAILS_TO_ALERT} раза подряд:\n\n${alerts.map((a) => `- ${a}`).join("\n")}\n\n` +
+      `При 429/403 источник сам стоит на паузе (сутки, при повторе дольше). Подробности — в таблицах feed_sources и feed_runs.\n` +
+      `Следующее письмо про этот источник придёт, только если он снова начнёт падать после успешного опроса.`,
+  };
+}
+
+export async function runJobsCron(db: D1Database, opts: { get?: Fetcher; notify?: (mail: Mail) => Promise<void> } = {}) {
   const collected = await collect(db, opts);
+  if (collected.alerts.length && opts.notify) {
+    await opts.notify(feedAlertMail(collected.alerts)).catch((e) => console.error("[jobs] alert mail failed:", e instanceof Error ? e.message : e));
+  }
   const matched = await matchUsers(db);
   await cleanup(db);
   const errors = collected.tasks.filter((t) => t.error).map((t) => `${t.task}: ${t.error}`);

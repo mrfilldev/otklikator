@@ -1,8 +1,8 @@
 import { SELF, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { emptyProfile, saveProfile, type Profile } from "../src/lib/profile";
-import { collect, listMatches, matchUsers, saveVacancies } from "../src/lib/jobs/pipeline";
-import { FEED_TASKS, fetchAts, parseRss, type FeedTask, type Fetcher, type RawVacancy } from "../src/lib/jobs/sources";
+import { collect, feedAlertMail, listMatches, matchUsers, saveVacancies } from "../src/lib/jobs/pipeline";
+import { FEED_TASKS, HttpError, fetchAts, parseRss, type FeedTask, type Fetcher, type RawVacancy } from "../src/lib/jobs/sources";
 import { BASE, signIn } from "./helpers";
 
 const NOW = Math.floor(Date.now() / 1000);
@@ -15,7 +15,7 @@ const FIXTURES: Record<string, string> = {
     { id: "101", epoch: NOW - 3600, position: "Senior Python Engineer", company: "Acme Inc.", location: "Worldwide", url: "https://remoteok.com/remote-jobs/101", tags: ["python", "django"], description: "&lt;p&gt;Django, PostgreSQL&lt;/p&gt;" },
     { id: "102", epoch: NOW - 60 * 86400, position: "Old Python Job", company: "Old", location: "Worldwide", url: "https://remoteok.com/remote-jobs/102" },
   ]),
-  "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss": `<?xml version="1.0"?><rss><channel>
+  "https://weworkremotely.com/remote-jobs.rss": `<?xml version="1.0"?><rss><channel>
     <item><title><![CDATA[Globex: Backend Developer (Python)]]></title><region>Anywhere in the World</region>
       <link>https://weworkremotely.com/remote-jobs/globex-backend</link><guid>https://weworkremotely.com/remote-jobs/globex-backend</guid>
       <pubDate>${new Date((NOW - 7200) * 1000).toUTCString()}</pubDate><description><![CDATA[<p>FastAPI &amp; Postgres</p>]]></description></item>
@@ -49,9 +49,9 @@ describe("источники", () => {
   });
 
   it("WWR RSS: компания и роль из заголовка", async () => {
-    const xml = FIXTURES["https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss"];
+    const xml = FIXTURES["https://weworkremotely.com/remote-jobs.rss"];
     expect(parseRss(xml)[0].title).toBe("Globex: Backend Developer (Python)");
-    const [v] = await task("wwr:remote-back-end-programming-jobs").run(fixtureFetch, NOW - 86400);
+    const [v] = await task("wwr").run(fixtureFetch, NOW - 86400);
     expect(v).toMatchObject({ source: "wwr", company: "Globex", title: "Backend Developer (Python)", location: "Anywhere in the World" });
   });
 
@@ -80,21 +80,46 @@ describe("конвейер", () => {
     expect(n?.n).toBe(2);
   });
 
-  it("обходит источники по кругу и пишет журнал с ошибками", async () => {
-    const tasks: FeedTask[] = ["a", "b", "c"].map((k) => ({
-      key: `t:${k}`,
-      run: async () => {
-        if (k === "b") throw new Error("HTTP 500");
-        return [raw(`t:${k}`, `Python Developer ${k}`, `Co ${k}`)];
-      },
-    }));
-    const r1 = await collect(env.DB, { tasks, perRun: 2, get: fixtureFetch });
-    expect(r1.tasks.map((t) => t.task)).toEqual(["t:a", "t:b"]);
-    expect(r1.tasks[1].error).toBe("HTTP 500");
-    const r2 = await collect(env.DB, { tasks, perRun: 2, get: fixtureFetch });
-    expect(r2.tasks.map((t) => t.task)).toEqual(["t:c", "t:a"]);
+  it("опрашивает источник по его расписанию, на 429 ставит на паузу и пишет после трёх неудач", async () => {
+    let status = 0;
+    const tasks: FeedTask[] = [
+      { key: "s:ok", everyHours: 5, run: async () => [raw("s:ok", "Python Developer ok", "Co ok")] },
+      { key: "s:500", everyHours: 5, run: async () => { throw new HttpError(500); } },
+      { key: "s:429", everyHours: 5, run: async () => { if (status) throw new HttpError(status); return []; } },
+    ];
+    const T0 = 2_000_000_000;
+    const r1 = await collect(env.DB, { tasks, ts: T0 });
+    expect(r1.tasks.map((t) => t.task).sort()).toEqual(["s:429", "s:500", "s:ok"]);
+
+    // через 20 минут никто не «к сроку»
+    expect((await collect(env.DB, { tasks, ts: T0 + 1200 })).tasks).toEqual([]);
+
+    // через 5 часов снова все; s:429 начинает отвечать 429
+    status = 429;
+    const r2 = await collect(env.DB, { tasks, ts: T0 + 5 * 3600 + 1800 });
+    expect(r2.tasks.find((t) => t.task === "s:429")?.error).toBe("HTTP 429");
+    const paused = await env.DB.prepare("SELECT paused_until, blocks FROM feed_sources WHERE task = 's:429'").first<{ paused_until: number; blocks: number }>();
+    expect(paused?.blocks).toBe(1);
+    expect(paused!.paused_until - (T0 + 5 * 3600 + 1800)).toBe(86400);
+
+    // ещё через 5 часов: s:429 на паузе, s:500 падает третий раз → письмо
+    const r3 = await collect(env.DB, { tasks, ts: T0 + 10 * 3600 + 1800 });
+    expect(r3.tasks.map((t) => t.task)).not.toContain("s:429");
+    expect(r3.alerts).toHaveLength(1);
+    expect(r3.alerts[0]).toContain("s:500");
+    expect(feedAlertMail(r3.alerts).to).toBe("mrfillippovvv@gmail.com");
+    // четвёртая неудача — без повторного письма
+    expect((await collect(env.DB, { tasks, ts: T0 + 15 * 3600 + 1800 })).alerts).toEqual([]);
+
+    // после паузы второй отказ подряд — пауза вдвое дольше
+    const t4 = T0 + 5 * 3600 + 1800 + 86400;
+    await collect(env.DB, { tasks, ts: t4 });
+    const p2 = await env.DB.prepare("SELECT paused_until, blocks FROM feed_sources WHERE task = 's:429'").first<{ paused_until: number; blocks: number }>();
+    expect(p2?.blocks).toBe(2);
+    expect(p2!.paused_until - t4).toBe(2 * 86400);
+
     const log = await env.DB.prepare("SELECT COUNT(*) AS n FROM feed_runs WHERE error IS NOT NULL").first<{ n: number }>();
-    expect(log?.n).toBe(1);
+    expect(log!.n).toBeGreaterThanOrEqual(4);
   });
 
   it("подбирает по анкете, пересчитывает при правке, показывает на странице", async () => {

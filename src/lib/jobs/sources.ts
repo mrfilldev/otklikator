@@ -24,6 +24,8 @@ export type Fetcher = (url: string) => Promise<string>;
 
 export interface FeedTask {
   key: string;
+  /** Как часто опрашивать, в часах. Как в рутинах resume: ~5 раз в сутки, ATS-доски — 4, HN — раз в сутки. */
+  everyHours: number;
   run: (get: Fetcher, since: number) => Promise<RawVacancy[]>;
 }
 
@@ -63,8 +65,11 @@ const json = async <T = any>(get: Fetcher, url: string): Promise<T> => JSON.pars
 // ---------------------------------------------------------------------------
 // Агрегаторы удалёнки
 
+const AGGREGATOR_HOURS = 5;
+
 const remoteok: FeedTask = {
   key: "remoteok",
+  everyHours: AGGREGATOR_HOURS,
   async run(get, since) {
     const data = await json<any[]>(get, "https://remoteok.com/api");
     return keep(
@@ -93,17 +98,12 @@ export function parseRss(xml: string): Record<string, string>[] {
   return items;
 }
 
-const WWR_CATEGORIES = [
-  "remote-back-end-programming-jobs",
-  "remote-full-stack-programming-jobs",
-  "remote-front-end-programming-jobs",
-  "remote-devops-sysadmin-jobs",
-  "remote-product-jobs",
-];
-const wwr: FeedTask[] = WWR_CATEGORIES.map((cat) => ({
-  key: `wwr:${cat}`,
+/** Один общий RSS вместо запроса на каждый раздел: меньше запросов к сайту, лишнее отсечёт скоринг. */
+const wwr: FeedTask = {
+  key: "wwr",
+  everyHours: AGGREGATOR_HOURS,
   async run(get, since) {
-    const items = parseRss(await get(`https://weworkremotely.com/categories/${cat}.rss`));
+    const items = parseRss(await get("https://weworkremotely.com/remote-jobs.rss"));
     return keep(
       items.map((it) => {
         const posted = toUnix(it.pubdate);
@@ -116,11 +116,12 @@ const wwr: FeedTask[] = WWR_CATEGORIES.map((cat) => ({
       }),
     );
   },
-}));
+};
 
-const HIMALAYAS_QUERIES = ["python", "backend", "full stack", "frontend", "java", "golang", "devops", "data engineer", "product manager", "project manager", "qa"];
+const HIMALAYAS_QUERIES = ["software engineer", "developer", "product manager"];
 const himalayas: FeedTask[] = HIMALAYAS_QUERIES.map((q) => ({
   key: `himalayas:${q}`,
+  everyHours: AGGREGATOR_HOURS,
   async run(get, since) {
     const data = await json(get, `https://himalayas.app/jobs/api?limit=50&q=${encodeURIComponent(q)}`);
     return keep(
@@ -136,11 +137,12 @@ const himalayas: FeedTask[] = HIMALAYAS_QUERIES.map((q) => ({
   },
 }));
 
-const REMOTIVE_CATEGORIES = ["software-dev", "product", "devops", "data", "qa", "project-management"];
-const remotive: FeedTask[] = REMOTIVE_CATEGORIES.map((cat) => ({
-  key: `remotive:${cat}`,
+/** Один запрос на всю ленту Remotive (они просят не дёргать API часто). */
+const remotive: FeedTask = {
+  key: "remotive",
+  everyHours: AGGREGATOR_HOURS,
   async run(get, since) {
-    const data = await json(get, `https://remotive.com/api/remote-jobs?limit=100&category=${cat}`);
+    const data = await json(get, "https://remotive.com/api/remote-jobs?limit=500");
     return keep(
       (data.jobs ?? []).map((j: any) => {
         const posted = toUnix(j.publication_date);
@@ -150,13 +152,14 @@ const remotive: FeedTask[] = REMOTIVE_CATEGORIES.map((cat) => ({
       }),
     );
   },
-}));
+};
 
-const JOBICY_QUERIES = ["tag=python", "tag=backend", "tag=javascript", "tag=java", "tag=product%20manager", "geo=europe&industry=dev", "geo=anywhere&industry=dev"];
+const JOBICY_QUERIES = ["industry=dev", "tag=product%20manager"];
 const jobicy: FeedTask[] = JOBICY_QUERIES.map((q) => ({
   key: `jobicy:${decodeURIComponent(q)}`,
+  everyHours: AGGREGATOR_HOURS,
   async run(get, since) {
-    const data = await json(get, `https://jobicy.com/api/v2/remote-jobs?count=50&${q}`);
+    const data = await json(get, `https://jobicy.com/api/v2/remote-jobs?count=100&${q}`);
     return keep(
       (data.jobs ?? []).map((j: any) => {
         const posted = toUnix(j.pubDate);
@@ -172,6 +175,7 @@ const jobicy: FeedTask[] = JOBICY_QUERIES.map((q) => ({
 function hnThread(kind: "hiring" | "freelance"): FeedTask {
   return {
     key: `hn:${kind}`,
+    everyHours: 24,
     async run(get, since) {
       const stories = await json(get, "https://hn.algolia.com/api/v1/search_by_date?tags=story,author_whoishiring&hitsPerPage=10");
       const needle = kind === "hiring" ? "who is hiring" : "seeking freelancer";
@@ -200,6 +204,7 @@ function hnThread(kind: "hiring" | "freelance"): FeedTask {
 function telegram(channel: string): FeedTask {
   return {
     key: `tg:${channel}`,
+    everyHours: AGGREGATOR_HOURS,
     async run(get, since) {
       const page = await get(`https://t.me/s/${channel}`);
       return keep(
@@ -311,14 +316,15 @@ export async function fetchAts(get: Fetcher, board: AtsBoard, since: number): Pr
 
 const atsTasks: FeedTask[] = ATS_BOARDS.map((board) => ({
   key: `${board.kind}:${board.slug}`,
+  everyHours: 6,
   run: (get, since) => fetchAts(get, board, since),
 }));
 
 /** Все источники по кругу. Порядок стабильный: курсор в feed_state указывает, с какого продолжить. */
 export const FEED_TASKS: FeedTask[] = [
   remoteok,
-  ...wwr,
-  ...remotive,
+  wwr,
+  remotive,
   ...himalayas,
   ...jobicy,
   hnThread("hiring"),
@@ -327,6 +333,16 @@ export const FEED_TASKS: FeedTask[] = [
   ...atsTasks,
 ];
 
+/** Ответ не 2xx. 429/403 — сайт просит отстать: источник уходит на паузу (см. pipeline.ts). */
+export class HttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly retryAfter: string | null = null,
+  ) {
+    super(`HTTP ${status}`);
+  }
+}
+
 export const USER_AGENT = "Mozilla/5.0 (compatible; OtklikatorBot/1.0; +https://otklikator.app)";
 
 export const httpFetcher: Fetcher = async (url) => {
@@ -334,6 +350,6 @@ export const httpFetcher: Fetcher = async (url) => {
     headers: { "User-Agent": USER_AGENT, Accept: "application/json, application/rss+xml, text/html;q=0.9, */*;q=0.5" },
     signal: AbortSignal.timeout(20_000),
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status, res.headers.get("retry-after"));
   return res.text();
 };
