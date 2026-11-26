@@ -34,7 +34,7 @@ name = "otklikator-prod"
 
 [env.production.vars]
 APP_URL = "https://otklikator-prod.mrfilldev.workers.dev"  # → свой домен, когда появится
-STRIPE_PRICE_ID = "price_REPLACE_WITH_LIVE_PRICE"
+STRIPE_PRICE_ID = "price_1Ug9ktRotwuJoz0InOAXgnih"
 EMAIL_FROM = "Otklikator <onboarding@resend.dev>"  # → noreply@<домен> после подтверждения в Resend
 
 [[env.production.d1_databases]]
