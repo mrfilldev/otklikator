@@ -91,12 +91,36 @@ npx wrangler secret put RESEND_API_KEY
 npm run deploy
 ```
 
+## Этап 3: поиск и скоринг вакансий
+
+- Cron Trigger каждые 20 минут (`[triggers]` в `wrangler.toml`, наследуется в прод) вызывает `runJobsCron` (`src/lib/jobs/pipeline.ts`).
+- Источники без браузера (`src/lib/jobs/sources.ts`, порт `resume/scripts/us_feeds.py` и `adjacent_feeds.py`): RemoteOK,
+  We Work Remotely (RSS), Remotive, Himalayas, Jobicy, HN «Who is hiring» и «Seeking freelancer», публичные Telegram-каналы
+  (`t.me/s/…`), ATS-доски компаний (Greenhouse, Lever, Ashby, Workable, Recruitee, SmartRecruiters) — список в
+  `src/lib/jobs/boards.ts` (из `ats_companies.json`, `cyprus_companies.csv`, `us_startups.csv`). LinkedIn не берём.
+  Фиды тянем широко (любой стек, продукт, проекты): отбор под человека делает скоринг.
+- За один запуск обходим `FEEDS_PER_RUN` источников по кругу (курсор в `feed_state`), чтобы уложиться в лимиты подзапросов
+  и запросов к D1. Журнал опросов с ошибками — `feed_runs` (хранится неделю).
+- Дедуп: `vacancies.id` (`<источник>:<id>`) и `fingerprint` (компания + должность), так одна вакансия с RemoteOK и из
+  Greenhouse компании сохраняется один раз. Вакансии, пропавшие из фидов больше 45 дней назад, удаляются.
+- Скоринг (`src/lib/jobs/score.ts`, обобщение `jobslib.score` + `triage.py`): роль из анкеты (и соседние), стек, грейд,
+  локация и формат, контракт/частичная занятость, свежесть → 0–100 и короткие причины. Отсекаем только «не хочу»,
+  чужую роль или язык, US-only, офис в другой стране (если человек не готов к переезду) и стажировки для опытных.
+  Порог `MIN_SCORE`.
+- Подбор (`matches`) считается для всех подтверждённых пользователей с анкетой, с курсора `match_state`; правка анкеты
+  пересчитывает свежие вакансии. Не больше 3 новых совпадений от одной компании за пересчёт. Страница `/app/matches`,
+  кнопка «Не подходит» скрывает вакансию.
+
+Миграция `0003_vacancies.sql` применяется сама в `deploy:cf` / `deploy:prod`. Локально cron можно дёрнуть так:
+`npx wrangler dev --test-scheduled`, затем `curl "http://localhost:8787/__scheduled?cron=*/20+*+*+*+*"`.
+
 ## Структура
 
 - `src/index.ts` — маршруты.
 - `src/lib/auth.ts` — регистрация, одноразовые ссылки, сессии (в БД только sha256 токенов).
 - `src/lib/billing.ts` — Stripe: Checkout, Portal, обработка вебхуков.
 - `src/lib/email.ts` — письма через Resend.
+- `src/lib/jobs/` — фиды вакансий, дедуп, скоринг и подбор (Cron).
 - `src/views.ts` — HTML-страницы.
 - `migrations/` — схема D1.
 - `test/` — тесты.

@@ -23,6 +23,7 @@ import {
 } from "./lib/billing";
 import { CvError, latestResume, loadResume, readCv, storeResume } from "./lib/cv";
 import { loginMail, sendMail } from "./lib/email";
+import { hideMatch, listMatches, runJobsCron } from "./lib/jobs/pipeline";
 import {
   ProfileExtractError,
   emptyProfile,
@@ -38,6 +39,7 @@ import {
   errorPage,
   invalidLinkPage,
   landingPage,
+  matchesPage,
   privacyPage,
   profilePage,
   termsPage,
@@ -101,13 +103,28 @@ app.use("/billing/*", requireUser);
 
 app.get("/app", async (c) => {
   const user = c.get("user");
-  const [sub, active, profile, resume] = await Promise.all([
+  const [sub, active, profile, resume, matchCount] = await Promise.all([
     latestSubscription(c.env.DB, user.id),
     hasActiveSubscription(c.env.DB, user.id),
     getProfile(c.env.DB, user.id),
     latestResume(c.env.DB, user.id),
+    c.env.DB.prepare("SELECT COUNT(*) AS n FROM matches WHERE user_id = ? AND status = 'new'").bind(user.id).first<{ n: number }>(),
   ]);
-  return c.html(dashboardPage(user, sub, active, c.req.query("paid") === "1", profile, resume));
+  return c.html(dashboardPage(user, sub, active, c.req.query("paid") === "1", profile, resume, matchCount?.n ?? 0));
+});
+
+// --- Подходящие вакансии (подбор считает Cron, см. scheduled ниже) ---
+
+app.get("/app/matches", async (c) => {
+  const user = c.get("user");
+  const [matches, active] = await Promise.all([listMatches(c.env.DB, user.id), hasActiveSubscription(c.env.DB, user.id)]);
+  return c.html(matchesPage(matches, active));
+});
+
+app.post("/app/matches/:seq/hide", async (c) => {
+  const seq = Number(c.req.param("seq"));
+  if (Number.isInteger(seq)) await hideMatch(c.env.DB, c.get("user").id, seq);
+  return c.redirect("/app/matches", 303);
 });
 
 // --- Резюме и анкета ---
@@ -227,4 +244,12 @@ app.onError((err, c) => {
   return c.html(errorPage(), 500);
 });
 
-export default app;
+export default {
+  fetch: app.fetch,
+  /** Cron Triggers (wrangler.toml → [triggers]): сбор вакансий из фидов и подбор по анкетам. */
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(
+      runJobsCron(env.DB).catch((e) => console.error("[jobs] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
+    );
+  },
+} satisfies ExportedHandler<Env>;

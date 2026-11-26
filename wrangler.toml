@@ -19,6 +19,11 @@ database_name = "otklikator"
 database_id = "6066b966-187e-4937-8a02-d23ec0ab8f0e"
 migrations_dir = "migrations"
 
+# Сбор вакансий и подбор по анкетам (src/lib/jobs). За запуск обходим часть источников по кругу,
+# полный круг (~100 источников) — примерно за 3 часа. Наследуется в [env.production].
+[triggers]
+crons = ["*/20 * * * *"]
+
 # Загруженные CV (оригиналы файлов). Создать один раз: npx wrangler r2 bucket create otklikator-cv
 [[r2_buckets]]
 binding = "CV_BUCKET"
