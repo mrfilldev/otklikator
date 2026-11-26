@@ -2,12 +2,22 @@ import { SELF, env } from "cloudflare:test";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { docxText, readCv } from "../src/lib/cv";
-import { emptyProfile, extractProfile, mergeProfiles, parseProfileJson, profileFromForm, profileToForm, type Profile } from "../src/lib/profile";
+import { makePdf } from "./pdf";
+import { emptyProfile, extractProfile, groundProfile, mergeProfiles, parseProfileJson, profileFromForm, profileToForm, type Profile } from "../src/lib/profile";
 import { BASE, signIn } from "./helpers";
 
 afterEach(() => vi.restoreAllMocks());
 
-const PDF = new TextEncoder().encode("%PDF-1.4\n1 0 obj << >> endobj\ntrailer << >>\n%%EOF\n");
+const CV_LINES = [
+  "Anna Petrova",
+  "Backend engineer (Python)",
+  "Limassol, Cyprus - anna@example.com - +357 99 123456 - Telegram: @anna_dev",
+  "Senior Python developer with 6+ years of commercial experience.",
+  "Moidex, Backend lead, 2022 - 2026: built the Python backend of a B2B SaaS CRM, led a team of 6.",
+  "Skills: Python, FastAPI, PostgreSQL, Redis, Docker. English C1, Russian native.",
+];
+const PDF = makePdf(CV_LINES);
+const SCAN = makePdf([]); // PDF без текста, как скан
 
 function docx(paragraphs: string[]): Uint8Array {
   const body = paragraphs.map((p) => `<w:p><w:r><w:t>${p}</w:t></w:r></w:p>`).join("");
@@ -55,17 +65,23 @@ async function upload(cookie: string, bytes: Uint8Array, name: string) {
 }
 
 describe("файл CV", () => {
-  it("узнаёт PDF и DOCX по содержимому, достаёт текст из DOCX", () => {
-    expect(readCv(PDF).kind).toBe("pdf");
-    const cv = readCv(docx(["Anna Petrova", "Backend engineer &amp; team lead with six years of Python experience"]));
+  it("достаёт текст из PDF и DOCX", async () => {
+    const pdf = await readCv(PDF);
+    expect(pdf.kind).toBe("pdf");
+    expect(pdf.text).toContain("Anna Petrova");
+    expect(pdf.text).toContain("+357 99 123456");
+    expect(pdf.text).toContain("Moidex, Backend lead");
+    const cv = await readCv(docx(CV_LINES.map((l) => l.replace("&", "&amp;"))));
     expect(cv.kind).toBe("docx");
-    expect(cv.kind === "docx" && cv.text).toBe("Anna Petrova\nBackend engineer & team lead with six years of Python experience");
+    expect(cv.text).toBe(CV_LINES.join("\n"));
   });
 
-  it("отклоняет чужие форматы, пустые и слишком большие файлы", () => {
-    expect(() => readCv(new TextEncoder().encode("hello world"))).toThrow("PDF или DOCX");
-    expect(() => readCv(new Uint8Array())).toThrow("пустой");
-    expect(() => readCv(new Uint8Array(6 * 1024 * 1024).fill(37))).toThrow("5 МБ");
+  it("отклоняет чужие форматы, пустые, слишком большие файлы и PDF без текста", async () => {
+    await expect(readCv(new TextEncoder().encode("hello world"))).rejects.toThrow("PDF или DOCX");
+    await expect(readCv(new Uint8Array())).rejects.toThrow("пустой");
+    await expect(readCv(new Uint8Array(6 * 1024 * 1024).fill(37))).rejects.toThrow("5 МБ");
+    await expect(readCv(SCAN)).rejects.toThrow("скан");
+    await expect(readCv(new TextEncoder().encode("%PDF-1.4 broken"))).rejects.toThrow("PDF");
     expect(() => docxText(zipSync({ "a.txt": strToU8("x") }))).toThrow("не похоже");
   });
 });
@@ -78,7 +94,7 @@ describe("загрузка CV и анкета", () => {
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/app/profile");
 
-    // в модель ушёл PDF файлом, с JSON-схемой анкеты
+    // в модель ушёл текст PDF (не файл), с JSON-схемой анкеты
     const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
     expect(body.model).toBe("z-ai/glm-5.3");
     const schema = body.response_format.json_schema.schema;
@@ -87,9 +103,9 @@ describe("загрузка CV и анкета", () => {
     expect([...schema.required].sort()).toEqual(Object.keys(schema.properties).sort());
     expect(schema.properties.contacts.additionalProperties).toBe(false);
     expect(schema.properties.experience.items.additionalProperties).toBe(false);
-    expect(body.plugins[0].id).toBe("file-parser");
-    expect(body.messages[1].content[0].type).toBe("file");
-    expect(body.messages[1].content[0].file.file_data).toMatch(/^data:application\/pdf;base64,JVBERi0/);
+    expect(body.plugins).toBeUndefined();
+    expect(body.messages[1].content).toContain("<resume>");
+    expect(body.messages[1].content).toContain("Moidex, Backend lead, 2022 - 2026");
     fetchSpy.mockRestore();
 
     const resume = await env.DB.prepare("SELECT * FROM resumes WHERE user_id = ?").bind(userId).first<{ r2_key: string; filename: string }>();
@@ -112,12 +128,10 @@ describe("загрузка CV и анкета", () => {
   it("DOCX уходит в модель текстом", async () => {
     const { cookie } = await signIn("docx@example.com");
     const fetchSpy = mockLlmProfile(aiProfile);
-    const res = await upload(cookie, docx(["Anna Petrova", "Senior Python developer, FastAPI, PostgreSQL, Kafka"]), "cv.docx");
+    const res = await upload(cookie, docx(CV_LINES), "cv.docx");
     expect(res.status).toBe(303);
     const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
-    expect(body.plugins).toBeUndefined();
-    expect(body.messages[1].content[0].type).toBe("text");
-    expect(body.messages[1].content[0].text).toContain("Senior Python developer");
+    expect(body.messages[1].content).toContain("Senior Python developer");
   });
 
   it("человек правит анкету, повторная загрузка не затирает его настройки", async () => {
@@ -208,9 +222,9 @@ describe("загрузка CV и анкета", () => {
 
 describe("анкета: логика", () => {
   it("без ключа API просит заполнить вручную, оборванный ответ — проверить", async () => {
-    await expect(extractProfile({ ...env, OPENROUTER_API_KEY: undefined }, readCv(PDF))).rejects.toThrow("вручную");
+    await expect(extractProfile({ ...env, OPENROUTER_API_KEY: undefined }, await readCv(PDF))).rejects.toThrow("вручную");
     mockLlm('{"full_name": "Anna', "length");
-    await expect(extractProfile(env, readCv(PDF))).rejects.toThrow("не полностью");
+    await expect(extractProfile(env, await readCv(PDF))).rejects.toThrow("не полностью");
   });
 
   it("понимает JSON в ```-блоке и без необязательных полей, отбрасывает мусор", () => {
@@ -238,11 +252,48 @@ describe("анкета: логика", () => {
     expect(back).toEqual(aiProfile);
   });
 
-  it("слияние: свежие данные главнее, пустое не затирает старое", () => {
-    const prev = { ...emptyProfile(), skills: ["Go"], salary_min: 4000, contacts: { ...emptyProfile().contacts, phone: "+357" } };
+  it("слияние: данные из CV заменяются целиком, настройки человека остаются", () => {
+    const prev = {
+      ...emptyProfile(),
+      full_name: "Выдуманное имя",
+      skills: ["Go"],
+      salary_min: 4000,
+      avoid: ["DevOps"],
+      contacts: { ...emptyProfile().contacts, phone: "+7 926 123-45-67" },
+    };
     const merged = mergeProfiles({ ...emptyProfile(), skills: ["Python"] }, prev);
     expect(merged.skills).toEqual(["Python"]);
+    expect(merged.full_name).toBeNull();
+    expect(merged.contacts.phone).toBeNull();
     expect(merged.salary_min).toBe(4000);
-    expect(merged.contacts.phone).toBe("+357");
+    expect(merged.avoid).toEqual(["DevOps"]);
+  });
+
+  it("выбрасывает то, чего нет в тексте CV: имя, город, телефон, ссылки, компании", () => {
+    const text = CV_LINES.join("\n");
+    const invented: Profile = {
+      ...aiProfile,
+      full_name: "Petrova Sergey",
+      location: "Moscow, Russia",
+      experience: [...aiProfile.experience, { company: "MiT (Fintech)", title: "Lead", period: "2021 – now", highlights: [] }],
+      contacts: {
+        email: "anna@example.com",
+        phone: "+7 926 123-45-67",
+        telegram: "@anna_dev",
+        linkedin: "linkedin.com/in/apetrova",
+        github: null,
+        website: null,
+      },
+    };
+    const g = groundProfile(invented, text);
+    expect(g.full_name).toBeNull();
+    expect(g.location).toBeNull();
+    expect(g.experience.map((e) => e.company)).toEqual(["Moidex"]);
+    expect(g.contacts).toEqual({ email: "anna@example.com", phone: null, telegram: "@anna_dev", linkedin: null, github: null, website: null });
+
+    const real = groundProfile({ ...aiProfile, contacts: { ...aiProfile.contacts, phone: "+357 99 123 456" } }, text);
+    expect(real.full_name).toBe("Anna Petrova");
+    expect(real.location).toBe("Limassol, Cyprus");
+    expect(real.contacts.phone).toBe("+357 99 123 456");
   });
 });

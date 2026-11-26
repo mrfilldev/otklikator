@@ -149,7 +149,7 @@ app.post("/app/cv", async (c) => {
   }
   let cv;
   try {
-    cv = readCv(new Uint8Array(await file.arrayBuffer()));
+    cv = await readCv(new Uint8Array(await file.arrayBuffer()));
   } catch (e) {
     if (e instanceof CvError) return c.html(profilePage(current, resume, { error: e.message }), 400);
     throw e;

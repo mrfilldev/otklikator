@@ -1,28 +1,53 @@
 import { unzipSync, strFromU8 } from "fflate";
+import { extractText, getDocumentProxy } from "unpdf";
 import { now, type Env } from "../env";
 
 export const MAX_CV_BYTES = 5 * 1024 * 1024;
 export const PDF_TYPE = "application/pdf";
 export const DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
+/** Меньше этого — считаем, что текста в файле нет (скан или картинка), и анкету по нему не заполняем. */
+export const MIN_CV_TEXT = 200;
+
 export type CvFile =
-  | { kind: "pdf"; bytes: Uint8Array; contentType: typeof PDF_TYPE }
+  | { kind: "pdf"; bytes: Uint8Array; contentType: typeof PDF_TYPE; text: string }
   | { kind: "docx"; bytes: Uint8Array; contentType: typeof DOCX_TYPE; text: string };
 
 export class CvError extends Error {}
 
-/** Проверяет файл по содержимому (не по расширению) и для DOCX достаёт текст. */
-export function readCv(bytes: Uint8Array): CvFile {
+/**
+ * Проверяет файл по содержимому (не по расширению) и достаёт из него текст.
+ * Модель получает только этот текст: если его нет, анкету не заполняем, а не даём модели гадать.
+ */
+export async function readCv(bytes: Uint8Array): Promise<CvFile> {
   if (bytes.length === 0) throw new CvError("Файл пустой.");
   if (bytes.length > MAX_CV_BYTES) throw new CvError("Файл больше 5 МБ. Сожмите PDF или загрузите DOCX.");
   const head = String.fromCharCode(...bytes.subarray(0, 5));
-  if (head === "%PDF-") return { kind: "pdf", bytes, contentType: PDF_TYPE };
+  if (head === "%PDF-") {
+    const text = await pdfText(bytes);
+    if (text.length < MIN_CV_TEXT) {
+      throw new CvError("Не получилось прочитать текст из PDF: похоже, это скан или картинка. Загрузите DOCX или PDF с текстом.");
+    }
+    return { kind: "pdf", bytes, contentType: PDF_TYPE, text };
+  }
   if (head.startsWith("PK")) {
     const text = docxText(bytes);
-    if (text.length < 50) throw new CvError("В документе почти нет текста. Загрузите PDF.");
+    if (text.length < MIN_CV_TEXT) throw new CvError("В документе почти нет текста. Загрузите PDF.");
     return { kind: "docx", bytes, contentType: DOCX_TYPE, text };
   }
   throw new CvError("Нужен PDF или DOCX.");
+}
+
+/** Текст из PDF (pdf.js через unpdf), страницы подряд. */
+export async function pdfText(bytes: Uint8Array): Promise<string> {
+  try {
+    // pdf.js забирает буфер себе, поэтому отдаём копию: оригинал ещё нужен для R2
+    const pdf = await getDocumentProxy(bytes.slice());
+    const { text } = await extractText(pdf, { mergePages: true });
+    return text.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim().slice(0, 100_000);
+  } catch {
+    throw new CvError("Не получилось открыть PDF. Сохраните резюме заново или загрузите DOCX.");
+  }
 }
 
 /** Текст из word/document.xml: абзацы — строками, ячейки таблиц — через табуляцию. */
@@ -78,7 +103,7 @@ export async function storeResume(env: Env, userId: string, filename: string, cv
     filename: safeFilename(filename, cv),
     content_type: cv.contentType,
     size: cv.bytes.length,
-    text: cv.kind === "docx" ? cv.text : null,
+    text: cv.text,
     created_at: now(),
   };
   await env.CV_BUCKET.put(row.r2_key, cv.bytes, {

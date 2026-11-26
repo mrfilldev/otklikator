@@ -135,15 +135,18 @@ export async function saveProfile(
 export const DEFAULT_PROFILE_MODEL = "z-ai/glm-5.3";
 const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
-const SYSTEM = `Ты помогаешь соискателю заполнить анкету для автоматических откликов на вакансии.
-Тебе дают его резюме. Заполни анкету строго по фактам из резюме и верни только JSON по заданной схеме.
-Правила:
-- Ничего не выдумывай и не завышай: нет данных — null или пустой список.
-- Формат работы, тип занятости, переезд и зарплату заполняй, только если они прямо указаны в резюме.
-- target_roles: 2–5 ролей, куда человек реально подходит по опыту, на английском, как в названиях вакансий.
+const SYSTEM = `Ты переносишь данные из резюме соискателя в анкету для откликов на вакансии.
+Резюме дано текстом внутри <resume>. Верни только JSON по заданной схеме.
+Главное правило: каждое значение должно дословно или по смыслу следовать из текста резюме.
+Ничего не придумывай: не сочиняй имя, город, телефон, ссылки, компании, даты, уровни языков и цифры.
+Если чего-то в тексте нет, ставь null или пустой список. Пустая анкета лучше выдуманной.
+- Имя, телефон, email, ссылки копируй символ в символ из текста.
+- Формат работы, тип занятости, переезд и зарплату заполняй, только если они прямо указаны.
+- target_roles: 2–5 ролей, куда человек подходит по опыту из резюме, на английском, как в названиях вакансий.
 - skills: технологии и инструменты из резюме, важные первыми, без дублей.
-- facts: 4–10 коротких вопросов и ответов в стиле форм откликов («Years of commercial Python experience» → «6+»),
-  на языке резюме. Числа бери из резюме.
+- years_experience: только если число лет есть в резюме или однозначно следует из дат.
+- experience: только места работы из резюме, с их названиями и периодами.
+- facts: 4–10 коротких вопросов и ответов в стиле форм откликов, только с цифрами и фактами из резюме.
 - summary и highlights пиши на языке резюме, коротко и по делу.`;
 
 /** Ошибка, которую можно показать человеку как есть. */
@@ -159,10 +162,6 @@ const PROFILE_JSON_SCHEMA = z.toJSONSchema(ProfileSchema, { target: "draft-7" })
 export async function extractProfile(env: Env, cv: CvFile): Promise<Profile> {
   if (!env.OPENROUTER_API_KEY) throw new ProfileExtractError("Автозаполнение пока не настроено. Заполните анкету вручную.");
 
-  const cvPart =
-    cv.kind === "pdf"
-      ? { type: "file", file: { filename: "cv.pdf", file_data: `data:application/pdf;base64,${toBase64(cv.bytes)}` } }
-      : { type: "text", text: `<resume>\n${cv.text}\n</resume>` };
 
   const res = await fetch(OPENROUTER_URL, {
     method: "POST",
@@ -179,10 +178,9 @@ export async function extractProfile(env: Env, cv: CvFile): Promise<Profile> {
       temperature: 0,
       messages: [
         { role: "system", content: SYSTEM },
-        { role: "user", content: [cvPart, { type: "text", text: "Заполни анкету по этому резюме." }] },
+        { role: "user", content: `<resume>\n${cv.text}\n</resume>\n\nЗаполни анкету строго по этому резюме.` },
       ],
       response_format: { type: "json_schema", json_schema: { name: "profile", strict: true, schema: PROFILE_JSON_SCHEMA } },
-      plugins: cv.kind === "pdf" ? [{ id: "file-parser", pdf: { engine: "pdf-text" } }] : undefined,
     }),
   });
   if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 500)}`);
@@ -200,7 +198,42 @@ export async function extractProfile(env: Env, cv: CvFile): Promise<Profile> {
     }
     throw new ProfileExtractError("Не удалось разобрать резюме. Попробуйте ещё раз или заполните анкету вручную.");
   }
-  return parsed;
+  return groundProfile(parsed, cv.text);
+}
+
+/**
+ * Страховка от выдумок: то, что можно проверить по тексту CV (имя, контакты, компании),
+ * оставляем, только если оно в тексте есть.
+ */
+export function groundProfile(p: Profile, cvText: string): Profile {
+  const text = cvText.toLowerCase().replace(/\s+/g, " ");
+  const compact = text.replace(/[\s-]/g, "");
+  const digits = cvText.replace(/\D/g, "");
+  const has = (v: string) => {
+    const t = v.toLowerCase().trim();
+    return !!t && (text.includes(t.replace(/\s+/g, " ")) || compact.includes(t.replace(/[\s-]/g, "")));
+  };
+  const keep = (v: string | null, test: (v: string) => boolean) => (v && test(v) ? v : null);
+  const handle = (v: string) => has(v.replace(/^@/, "").replace(/^https?:\/\/(www\.)?/, "").replace(/\/+$/, ""));
+  const phone = (v: string) => {
+    const d = v.replace(/\D/g, "");
+    return d.length >= 7 && digits.includes(d);
+  };
+  const name = (v: string) => v.split(/\s+/).filter(Boolean).every((w) => has(w));
+  return {
+    ...p,
+    full_name: keep(p.full_name, name),
+    location: keep(p.location, (v) => has(v.split(/,\s*/)[0])), // город должен быть в тексте
+    experience: p.experience.filter((e) => has(e.company)),
+    contacts: {
+      email: keep(p.contacts.email, has),
+      phone: keep(p.contacts.phone, phone),
+      telegram: keep(p.contacts.telegram, handle),
+      linkedin: keep(p.contacts.linkedin, handle),
+      github: keep(p.contacts.github, handle),
+      website: keep(p.contacts.website, handle),
+    },
+  };
 }
 
 /** Достаёт JSON из ответа модели (бывает в ```json ...```), дополняет пропущенные поля и проверяет схемой. */
@@ -224,11 +257,6 @@ export function parseProfileJson(content: string): Profile | null {
   return result.success ? result.data : null;
 }
 
-function toBase64(bytes: Uint8Array): string {
-  let bin = "";
-  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(bin);
-}
 
 // ---------------------------------------------------------------------------
 // Форма редактирования: списки — по строке на элемент, опыт — блоками через пустую строку.
@@ -312,18 +340,18 @@ export function profileFromForm(form: Record<string, unknown>): Profile {
   };
 }
 
-/** Свежие данные из CV поверх старой анкеты: пустые поля нового разбора не затирают заполненные раньше. */
+/** Поля, которых в CV обычно нет и которые человек указывает сам. */
+const USER_FIELDS = ["work_formats", "employment_types", "relocation", "salary_min", "salary_currency", "avoid"] as const;
+
+/**
+ * Новая анкета по CV поверх старой. Всё, что берётся из резюме (имя, контакты, опыт, языки…), заменяется целиком,
+ * чтобы повторное заполнение исправляло ошибки прошлого разбора. Сохраняются только настройки человека (USER_FIELDS),
+ * если в новом CV их нет.
+ */
 export function mergeProfiles(fresh: Profile, previous: Profile | null): Profile {
   if (!previous) return fresh;
-  const isEmpty = (v: unknown) => v === null || (Array.isArray(v) && v.length === 0);
   const out = { ...fresh } as Record<string, unknown>;
-  for (const [k, v] of Object.entries(previous)) {
-    if (k === "contacts") continue;
-    if (isEmpty(out[k]) && !isEmpty(v)) out[k] = v;
-  }
-  const contacts = { ...fresh.contacts };
-  for (const [k, v] of Object.entries(previous.contacts) as [keyof Profile["contacts"], string | null][]) {
-    if (!contacts[k] && v) contacts[k] = v;
-  }
-  return { ...(out as Profile), contacts };
+  const isEmpty = (v: unknown) => v === null || (Array.isArray(v) && v.length === 0);
+  for (const k of USER_FIELDS) if (isEmpty(out[k]) && !isEmpty(previous[k])) out[k] = previous[k];
+  return out as Profile;
 }
