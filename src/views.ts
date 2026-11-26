@@ -5,6 +5,7 @@ import type { SubscriptionRow } from "./lib/billing";
 import type { ResumeRow } from "./lib/cv";
 import type { MatchView } from "./lib/jobs/pipeline";
 import { hasFlag } from "./lib/jobs/text";
+import { DAILY_LETTER_LIMIT, mailtoLink, type ApplicationRow, type MatchDetail } from "./lib/letters";
 import { EMPLOYMENT, SENIORITY, WORK_FORMATS, profileToForm, type StoredProfile } from "./lib/profile";
 
 type Html = HtmlEscapedString | Promise<HtmlEscapedString>;
@@ -386,7 +387,7 @@ export function matchesPage(matches: MatchView[], active: boolean) {
   const items = matches.map(
     (m) => html`<div class="card" style="padding:16px 20px;margin:12px 0">
       <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
-        <a href="${m.url}" target="_blank" rel="noopener noreferrer" style="font-weight:600">${m.title}</a>
+        <a href="/app/matches/${m.seq}" style="font-weight:600">${m.title}</a>
         <span class="muted" title="Насколько вакансия подходит по анкете">${m.score}</span>
       </div>
       <p class="muted" style="margin:4px 0 8px">${m.company}${m.location ? html` · ${m.location}` : ""}${hasFlag(m.flags, "CONTRACT") ? " · контракт" : ""}</p>
@@ -399,7 +400,78 @@ export function matchesPage(matches: MatchView[], active: boolean) {
     html`<p><a href="/app">← Кабинет</a></p>
       <h1>Подходящие вакансии</h1>
       <p class="muted">Подбираем по вашей анкете из открытых источников, список обновляется несколько раз в час.
-        ${active ? "" : html`Чтобы мы сами писали письма и откликались, <a href="/app">включите автопоиск</a>.`}</p>
+        ${active ? "Откройте вакансию, чтобы получить готовое письмо-отклик." : html`Чтобы мы писали письма-отклики, <a href="/app">включите автопоиск</a>.`}</p>
       ${matches.length ? items : html`<div class="card"><p class="muted">Пока ничего не нашли. Проверьте, что в <a href="/app/profile">анкете</a> указаны целевые роли и стек.</p></div>`}`,
+  );
+}
+
+const LETTER_ERRORS: Record<string, string> = {
+  draft: "Не получилось написать письмо. Попробуйте ещё раз через минуту.",
+  limit: `За сутки можно получить до ${DAILY_LETTER_LIMIT} писем. Завтра лимит обновится.`,
+  email: "Похоже, в адресе опечатка.",
+  empty: "Тема и текст письма не могут быть пустыми.",
+};
+
+const fmtDate = (ts: number) => new Date(ts * 1000).toLocaleDateString("ru-RU", { day: "numeric", month: "long" });
+
+export function matchPage(
+  m: MatchDetail,
+  a: ApplicationRow | null,
+  active: boolean,
+  opts: { recent?: { sent_at: number; title: string } | null; error?: string; saved?: boolean } = {},
+) {
+  const unverified = a ? (JSON.parse(a.unverified) as string[]) : [];
+  const error = opts.error ? LETTER_ERRORS[opts.error] : undefined;
+  const generate = (label: string) =>
+    html`<form method="post" action="/app/matches/${m.seq}/letter" onsubmit="this.querySelector('button').disabled=true;this.querySelector('button').textContent='Пишем письмо…'">
+      <button type="submit">${label}</button></form>`;
+
+  let letter;
+  if (!active) {
+    letter = html`<div class="card"><p>Готовое письмо под эту вакансию — с подпиской.</p>
+      <form method="post" action="/billing/checkout"><button type="submit">Включить автопоиск — €5/неделя</button></form></div>`;
+  } else if (!a || a.status === "skipped") {
+    letter = html`<div class="card"><p class="muted" style="margin:0">Напишем 3–4 предложения под эту вакансию по вашей анкете: деталь о компании, ваш кейс с цифрой, предложение созвониться.</p>
+      ${generate("Написать письмо")}</div>`;
+  } else if (a.status === "sent") {
+    letter = html`<div class="card"><p class="ok" style="margin:0 0 8px">✓ Отклик отправлен ${a.sent_at ? fmtDate(a.sent_at) : ""}${a.to_email ? html` на ${a.to_email}` : ""}</p>
+      <p style="margin:0 0 8px;font-weight:600">${a.subject}</p><p style="white-space:pre-wrap;margin:0">${a.body}</p></div>`;
+  } else {
+    letter = html`<div class="card">
+      ${opts.saved ? html`<p class="ok">Сохранено.</p>` : ""}
+      ${unverified.length ? html`<p class="warn">Проверьте цифры ${unverified.join(", ")}: их нет ни в анкете, ни в вакансии.</p>` : ""}
+      <form method="post" action="/app/matches/${m.seq}/application">
+        <label for="to_email">Кому</label>
+        <input id="to_email" name="to_email" type="text" inputmode="email" value="${a.to_email ?? ""}" placeholder="адрес для отклика" />
+        ${a.to_email ? "" : html`<p class="hint" style="margin:4px 0 0">Адреса в тексте вакансии нет. Откликнитесь через форму на сайте и вставьте текст туда, или впишите адрес, если знаете.</p>`}
+        <label for="subject">Тема</label>
+        <input id="subject" name="subject" type="text" value="${a.subject}" />
+        <label for="body">Письмо</label>
+        <textarea id="body" name="body" style="min-height:260px">${a.body}</textarea>
+        <button type="submit" style="background:var(--muted)">Сохранить правки</button>
+      </form>
+      <p style="margin:16px 0 0">
+        ${a.to_email ? html`<a href="${mailtoLink(a)}">Открыть в почте</a> · ` : ""}<a href="${m.url}" target="_blank" rel="noopener noreferrer">Страница вакансии</a>
+      </p>
+      <p class="hint" style="margin:4px 0 0">Отправка с вашего Gmail в один клик появится позже. Пока — из своей почты или через форму на сайте; CV можно <a href="/app/cv">скачать здесь</a>.</p>
+      <form method="post" action="/app/matches/${m.seq}/sent"><button type="submit">Я отправил(а)</button></form>
+      <div style="display:flex;gap:16px;margin-top:12px">
+        <form method="post" action="/app/matches/${m.seq}/letter"><button class="link" type="submit" style="font-size:14px">Написать заново</button></form>
+        <form method="post" action="/app/matches/${m.seq}/skip"><button class="link" type="submit" style="font-size:14px">Пропустить вакансию</button></form>
+      </div>
+    </div>`;
+  }
+
+  return layout(
+    `${m.title} — Otklikator`,
+    html`<p><a href="/app/matches">← Подходящие вакансии</a></p>
+      <h1>${m.title}</h1>
+      <p class="muted">${m.company}${m.location ? html` · ${m.location}` : ""}${hasFlag(m.flags, "CONTRACT") ? " · контракт" : ""} · совпадение ${m.score}
+        · <a href="${m.url}" target="_blank" rel="noopener noreferrer">открыть вакансию</a></p>
+      ${m.reasons.length ? html`<p class="hint">${m.reasons.join(" · ")}</p>` : ""}
+      ${opts.recent ? html`<p class="warn">Вы уже откликались в ${m.company} ${fmtDate(opts.recent.sent_at)} («${opts.recent.title}»). Лучше подождать две недели с прошлого отклика.</p>` : ""}
+      ${error ? html`<p class="warn">${error}</p>` : ""}
+      ${letter}
+      ${m.description ? html`<details><summary class="muted">Текст вакансии</summary><p style="white-space:pre-wrap;font-size:15px">${m.description}</p></details>` : ""}`,
   );
 }

@@ -17,6 +17,8 @@ export function cleanHtml(s: string | null | undefined): string {
   const once = unescapeHtml(unescapeHtml(s ?? ""));
   return once
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, " ")
+    // Адрес из mailto: оставляем в тексте: по нему потом ищем, куда отправить отклик.
+    .replace(/<a\b[^>]*href=["']mailto:([^"'?]+)[^>]*>/gi, " $1 ")
     .replace(/<[^>]+>/g, " ")
     .replace(/\s+/g, " ")
     .trim();
