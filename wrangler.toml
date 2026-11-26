@@ -10,6 +10,8 @@ APP_URL = "https://otklikator.mrfilldev.workers.dev"
 STRIPE_PRICE_ID = "price_1Ug9rRRotwuJoz0Ia1savgC3"
 # Отправитель писем (onboarding@resend.dev работает без домена, но только на адрес владельца аккаунта Resend; для пользователей нужен свой домен).
 EMAIL_FROM = "Otklikator <onboarding@resend.dev>"
+# Модель на OpenRouter для автозаполнения анкеты по CV.
+OPENROUTER_MODEL = "z-ai/glm-5.3"
 
 [[d1_databases]]
 binding = "DB"
@@ -26,7 +28,7 @@ bucket_name = "otklikator-cv"
 #   wrangler secret put STRIPE_SECRET_KEY
 #   wrangler secret put STRIPE_WEBHOOK_SECRET
 #   wrangler secret put RESEND_API_KEY
-#   wrangler secret put ANTHROPIC_API_KEY   (автозаполнение анкеты по CV)
+#   wrangler secret put OPENROUTER_API_KEY   (автозаполнение анкеты по CV)
 # Локально — в .dev.vars (файл в .gitignore), пример в .dev.vars.example
 
 # ---------------------------------------------------------------------------
@@ -42,6 +44,7 @@ routes = [{ pattern = "otklikator.app", custom_domain = true }]
 [env.production.vars]
 APP_URL = "https://otklikator.app"
 STRIPE_PRICE_ID = "price_1Ug9ktRotwuJoz0InOAXgnih"
+OPENROUTER_MODEL = "z-ai/glm-5.3"
 EMAIL_FROM = "Otklikator <noreply@otklikator.app>"  # домен подтверждается в Resend (DNS)
 
 [[env.production.d1_databases]]

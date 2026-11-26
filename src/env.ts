@@ -7,8 +7,10 @@ export interface Env {
   STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   RESEND_API_KEY?: string;
-  /** Ключ Claude API для автозаполнения анкеты по CV. Без него анкету заполняют вручную. */
-  ANTHROPIC_API_KEY?: string;
+  /** Ключ OpenRouter для автозаполнения анкеты по CV. Без него анкету заполняют вручную. */
+  OPENROUTER_API_KEY?: string;
+  /** Модель на OpenRouter для разбора CV, например z-ai/glm-5.3. */
+  OPENROUTER_MODEL?: string;
 }
 
 export interface User {

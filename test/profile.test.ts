@@ -2,7 +2,7 @@ import { SELF, env } from "cloudflare:test";
 import { strToU8, zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { docxText, readCv } from "../src/lib/cv";
-import { emptyProfile, extractProfile, mergeProfiles, profileFromForm, profileToForm, type Profile } from "../src/lib/profile";
+import { emptyProfile, extractProfile, mergeProfiles, parseProfileJson, profileFromForm, profileToForm, type Profile } from "../src/lib/profile";
 import { BASE, signIn } from "./helpers";
 
 afterEach(() => vi.restoreAllMocks());
@@ -33,23 +33,20 @@ const aiProfile: Profile = {
   contacts: { ...emptyProfile().contacts, email: "anna@example.com" },
 };
 
-/** Подменяет ответ Claude API: модель «возвращает» анкету JSON-ом. */
-function mockClaude(profile: Profile | null, stop_reason = "end_turn") {
+/** Подменяет ответ OpenRouter: модель «возвращает» анкету JSON-ом. */
+function mockLlm(content: string | null, finish_reason = "stop") {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (!url.includes("api.anthropic.com")) throw new Error(`unexpected fetch ${url}`);
+    if (!url.startsWith("https://openrouter.ai/api/v1/")) throw new Error(`unexpected fetch ${url}`);
     return Response.json({
-      id: "msg_1",
-      type: "message",
-      role: "assistant",
-      model: "claude-opus-5-5",
-      content: profile ? [{ type: "text", text: JSON.stringify(profile) }] : [],
-      stop_reason,
-      stop_details: null,
-      usage: { input_tokens: 1000, output_tokens: 500 },
+      id: "gen-1",
+      model: "z-ai/glm-5.3",
+      choices: [{ index: 0, finish_reason, message: { role: "assistant", content } }],
+      usage: { prompt_tokens: 1000, completion_tokens: 500 },
     });
   });
 }
+const mockLlmProfile = (p: Profile | null, finish = "stop") => mockLlm(p ? JSON.stringify(p) : null, finish);
 
 async function upload(cookie: string, bytes: Uint8Array, name: string) {
   const form = new FormData();
@@ -76,16 +73,23 @@ describe("файл CV", () => {
 describe("загрузка CV и анкета", () => {
   it("загружает PDF, заполняет анкету моделью и показывает её", async () => {
     const { cookie, userId } = await signIn("anna@example.com");
-    const fetchSpy = mockClaude(aiProfile);
+    const fetchSpy = mockLlmProfile(aiProfile);
     const res = await upload(cookie, PDF, "Anna CV.pdf");
     expect(res.status).toBe(303);
     expect(res.headers.get("location")).toBe("/app/profile");
 
-    // в модель ушёл PDF как document-блок, с fallbacks
+    // в модель ушёл PDF файлом, с JSON-схемой анкеты
     const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
-    expect(body.model).toBe("claude-opus-5-5");
-    expect(body.fallbacks).toBe("default");
-    expect(body.messages[0].content[0]).toMatchObject({ type: "document", source: { media_type: "application/pdf" } });
+    expect(body.model).toBe("z-ai/glm-5.3");
+    const schema = body.response_format.json_schema.schema;
+    // strict-режим требует: все поля обязательны, лишних нет (вложенные объекты тоже)
+    expect(schema.additionalProperties).toBe(false);
+    expect([...schema.required].sort()).toEqual(Object.keys(schema.properties).sort());
+    expect(schema.properties.contacts.additionalProperties).toBe(false);
+    expect(schema.properties.experience.items.additionalProperties).toBe(false);
+    expect(body.plugins[0].id).toBe("file-parser");
+    expect(body.messages[1].content[0].type).toBe("file");
+    expect(body.messages[1].content[0].file.file_data).toMatch(/^data:application\/pdf;base64,JVBERi0/);
     fetchSpy.mockRestore();
 
     const resume = await env.DB.prepare("SELECT * FROM resumes WHERE user_id = ?").bind(userId).first<{ r2_key: string; filename: string }>();
@@ -107,17 +111,18 @@ describe("загрузка CV и анкета", () => {
 
   it("DOCX уходит в модель текстом", async () => {
     const { cookie } = await signIn("docx@example.com");
-    const fetchSpy = mockClaude(aiProfile);
+    const fetchSpy = mockLlmProfile(aiProfile);
     const res = await upload(cookie, docx(["Anna Petrova", "Senior Python developer, FastAPI, PostgreSQL, Kafka"]), "cv.docx");
     expect(res.status).toBe(303);
     const body = JSON.parse(String((fetchSpy.mock.calls[0][1] as RequestInit).body));
-    expect(body.messages[0].content[0].type).toBe("text");
-    expect(body.messages[0].content[0].text).toContain("Senior Python developer");
+    expect(body.plugins).toBeUndefined();
+    expect(body.messages[1].content[0].type).toBe("text");
+    expect(body.messages[1].content[0].text).toContain("Senior Python developer");
   });
 
   it("человек правит анкету, повторная загрузка не затирает его настройки", async () => {
     const { cookie, userId } = await signIn("edit@example.com");
-    mockClaude(aiProfile);
+    mockLlmProfile(aiProfile);
     await upload(cookie, PDF, "cv.pdf");
 
     const form = new URLSearchParams({
@@ -181,7 +186,7 @@ describe("загрузка CV и анкета", () => {
 
     // повтор по уже загруженному файлу
     vi.restoreAllMocks();
-    mockClaude(aiProfile);
+    mockLlmProfile(aiProfile);
     await SELF.fetch(`${BASE}/app/profile/refill`, { method: "POST", headers: { cookie }, redirect: "manual" });
     const again = await (await SELF.fetch(`${BASE}/app/profile`, { headers: { cookie } })).text();
     expect(again).toContain("Anna Petrova");
@@ -203,9 +208,19 @@ describe("загрузка CV и анкета", () => {
 
 describe("анкета: логика", () => {
   it("без ключа API просит заполнить вручную, оборванный ответ — проверить", async () => {
-    await expect(extractProfile({ ...env, ANTHROPIC_API_KEY: undefined }, readCv(PDF))).rejects.toThrow("вручную");
-    mockClaude(null, "max_tokens");
+    await expect(extractProfile({ ...env, OPENROUTER_API_KEY: undefined }, readCv(PDF))).rejects.toThrow("вручную");
+    mockLlm('{"full_name": "Anna', "length");
     await expect(extractProfile(env, readCv(PDF))).rejects.toThrow("не полностью");
+  });
+
+  it("понимает JSON в ```-блоке и без необязательных полей, отбрасывает мусор", () => {
+    const p = parseProfileJson('Вот анкета:\n```json\n{"full_name":"Anna","skills":["Python"],"contacts":{"email":"a@b.c"}}\n```');
+    expect(p?.full_name).toBe("Anna");
+    expect(p?.skills).toEqual(["Python"]);
+    expect(p?.contacts.email).toBe("a@b.c");
+    expect(p?.contacts.phone).toBeNull();
+    expect(parseProfileJson("no json here")).toBeNull();
+    expect(parseProfileJson('{"seniority":"guru"}')).toBeNull();
   });
 
   it("форма и анкета переводятся туда и обратно без потерь", () => {
