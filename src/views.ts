@@ -82,7 +82,7 @@ export function dashboardPage(user: User, sub: SubscriptionRow | null, active: b
   } else {
     status = html`<p>Автопоиск выключен.</p>
       ${sub && sub.status === "past_due" ? html`<p class="warn">Не прошла оплата — обновите карту.</p>` : ""}
-      <form method="post" action="/billing/checkout"><button type="submit">Включить автопоиск — $5 в неделю</button></form>
+      <form method="post" action="/billing/checkout"><button type="submit">Включить автопоиск — €5 в неделю</button></form>
       ${user.stripe_customer_id
         ? html`<form method="post" action="/billing/portal"><button class="link" type="submit">Счета и карта</button></form>`
         : ""}`;
