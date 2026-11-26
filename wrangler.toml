@@ -5,16 +5,16 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Публичный адрес сайта: ссылки в письмах и redirect после Stripe Checkout.
-APP_URL = "http://localhost:8787"
+APP_URL = "https://otklikator.mrfilldev.workers.dev"
 # Price из Stripe Dashboard: recurring, интервал week (сейчас $5 / неделю).
 STRIPE_PRICE_ID = "price_REPLACE_ME"
-# Отправитель писем (домен должен быть подтверждён в Resend).
-EMAIL_FROM = "Otklikator <noreply@example.com>"
+# Отправитель писем (onboarding@resend.dev работает без домена, но только на адрес владельца аккаунта Resend; для пользователей нужен свой домен).
+EMAIL_FROM = "Otklikator <onboarding@resend.dev>"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "otklikator"
-database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+database_id = "6066b966-187e-4937-8a02-d23ec0ab8f0e"
 migrations_dir = "migrations"
 
 # Секреты (не в этом файле!):

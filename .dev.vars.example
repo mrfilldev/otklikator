@@ -3,3 +3,5 @@ STRIPE_SECRET_KEY=sk_test_xxx
 STRIPE_WEBHOOK_SECRET=whsec_xxx
 # Пусто = письма не отправляются, ссылка для входа печатается в консоль wrangler dev.
 RESEND_API_KEY=
+# Для wrangler dev: ссылки в письмах ведут на локальный сервер
+APP_URL=http://localhost:8787
