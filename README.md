@@ -14,6 +14,29 @@
 - Stripe: Checkout в режиме подписки, Customer Portal, вебхук `/stripe/webhook` с проверкой подписи
   и защитой от повторной доставки. Доступ к автопоиску определяется по таблице `subscriptions` (статусы `active`, `trialing`).
 
+## Этап 2: резюме и анкета
+
+- `/app/profile`: загрузка CV (PDF или DOCX до 5 МБ, тип проверяется по содержимому). Оригинал лежит в R2 (`CV_BUCKET`),
+  метаданные — в таблице `resumes`, его можно скачать (`/app/cv`): этот файл потом уйдёт работодателям.
+- Анкета-портрет (`profiles`, JSON по `ProfileSchema` в `src/lib/profile.ts`): роли, стек, уровень и опыт, формат и занятость,
+  локация, зарплата, языки, места работы с достижениями, готовые ответы для форм откликов, контакты, «не предлагать».
+- Автозаполнение: OpenRouter, модель из `OPENROUTER_MODEL` (сейчас `z-ai/glm-5.3`), JSON по схеме + проверка zod.
+  PDF уходит файлом, текст из него достаёт OpenRouter (плагин file-parser, движок pdf-text, бесплатный); из DOCX текст достаём сами.
+  Модель заполняет только то, что есть в CV; формат, зарплату и «не предлагать» человек указывает сам,
+  и повторная загрузка CV их не затирает. Без `OPENROUTER_API_KEY` или при сбое CV сохраняется, анкета заполняется вручную,
+  есть кнопка «Заполнить по резюме заново».
+
+Перед первым деплоем этапа 2:
+
+```sh
+npx wrangler r2 bucket create otklikator-cv
+npx wrangler r2 bucket create otklikator-cv-prod
+npx wrangler secret put OPENROUTER_API_KEY                    # тест
+npx wrangler secret put OPENROUTER_API_KEY --env production   # прод
+```
+
+Миграция `0002_profile.sql` применяется сама в `deploy:cf` / `deploy:prod`.
+
 ## Локальный запуск
 
 ```sh

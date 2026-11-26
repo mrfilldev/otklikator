@@ -5,3 +5,5 @@ STRIPE_WEBHOOK_SECRET=whsec_xxx
 RESEND_API_KEY=
 # Для wrangler dev: ссылки в письмах ведут на локальный сервер
 APP_URL=http://localhost:8787
+# Пусто = автозаполнения анкеты нет, CV сохраняется, анкета заполняется вручную.
+OPENROUTER_API_KEY=

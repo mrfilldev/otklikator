@@ -13,6 +13,7 @@ export default defineConfig(async () => {
             STRIPE_SECRET_KEY: "sk_test_dummy",
             STRIPE_WEBHOOK_SECRET: "whsec_test_secret",
             STRIPE_PRICE_ID: "price_test_weekly",
+            OPENROUTER_API_KEY: "sk-or-test",
           },
         },
       }),
