@@ -13,8 +13,11 @@
     "deploy:prod": "wrangler d1 migrations apply otklikator-prod --remote --env production && wrangler deploy --env production"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^1.14.0",
+    "fflate": "^0.8.3",
     "hono": "^4.13.22",
-    "stripe": "^23.2.0"
+    "stripe": "^23.2.0",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.9.2",
