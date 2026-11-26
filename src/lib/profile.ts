@@ -1,5 +1,3 @@
-import Anthropic from "@anthropic-ai/sdk";
-import { betaZodOutputFormat } from "@anthropic-ai/sdk/helpers/beta/zod";
 import { z } from "zod";
 import { now, type Env } from "../env";
 import type { CvFile } from "./cv";
@@ -133,10 +131,12 @@ export async function saveProfile(
 // ---------------------------------------------------------------------------
 // Автозаполнение по CV
 
-export const PROFILE_MODEL = "claude-opus-5-5";
+/** Модель по умолчанию; меняется переменной OPENROUTER_MODEL в wrangler.toml без правки кода. */
+export const DEFAULT_PROFILE_MODEL = "z-ai/glm-5.3";
+const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 const SYSTEM = `Ты помогаешь соискателю заполнить анкету для автоматических откликов на вакансии.
-Тебе дают его резюме. Заполни анкету строго по фактам из резюме.
+Тебе дают его резюме. Заполни анкету строго по фактам из резюме и верни только JSON по заданной схеме.
 Правила:
 - Ничего не выдумывай и не завышай: нет данных — null или пустой список.
 - Формат работы, тип занятости, переезд и зарплату заполняй, только если они прямо указаны в резюме.
@@ -149,30 +149,79 @@ const SYSTEM = `Ты помогаешь соискателю заполнить 
 /** Ошибка, которую можно показать человеку как есть. */
 export class ProfileExtractError extends Error {}
 
-export async function extractProfile(env: Env, cv: CvFile): Promise<Profile> {
-  if (!env.ANTHROPIC_API_KEY) throw new ProfileExtractError("Автозаполнение пока не настроено. Заполните анкету вручную.");
-  const client = new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, timeout: 90_000 });
+const PROFILE_JSON_SCHEMA = z.toJSONSchema(ProfileSchema, { target: "draft-7" });
 
-  const cvBlock: Anthropic.Beta.BetaContentBlockParam =
+/**
+ * Заполняет анкету через OpenRouter (OpenAI-совместимый API).
+ * PDF отдаём файлом: OpenRouter сам достаёт из него текст (плагин file-parser), DOCX — нашим текстом.
+ * Ответ всегда проверяем схемой, даже если провайдер поддерживает structured outputs.
+ */
+export async function extractProfile(env: Env, cv: CvFile): Promise<Profile> {
+  if (!env.OPENROUTER_API_KEY) throw new ProfileExtractError("Автозаполнение пока не настроено. Заполните анкету вручную.");
+
+  const cvPart =
     cv.kind === "pdf"
-      ? { type: "document", source: { type: "base64", media_type: "application/pdf", data: toBase64(cv.bytes) } }
+      ? { type: "file", file: { filename: "cv.pdf", file_data: `data:application/pdf;base64,${toBase64(cv.bytes)}` } }
       : { type: "text", text: `<resume>\n${cv.text}\n</resume>` };
 
-  const response = await client.beta.messages.parse({
-    model: PROFILE_MODEL,
-    max_tokens: 16000,
-    betas: ["server-side-fallback-2026-07-01"],
-    fallbacks: "default",
-    output_config: { effort: "low", format: betaZodOutputFormat(ProfileSchema) },
-    system: SYSTEM,
-    messages: [{ role: "user", content: [cvBlock, { type: "text", text: "Заполни анкету по этому резюме." }] }],
+  const res = await fetch(OPENROUTER_URL, {
+    method: "POST",
+    signal: AbortSignal.timeout(120_000),
+    headers: {
+      Authorization: `Bearer ${env.OPENROUTER_API_KEY}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": env.APP_URL,
+      "X-Title": "Otklikator",
+    },
+    body: JSON.stringify({
+      model: env.OPENROUTER_MODEL || DEFAULT_PROFILE_MODEL,
+      max_tokens: 8000,
+      temperature: 0,
+      messages: [
+        { role: "system", content: SYSTEM },
+        { role: "user", content: [cvPart, { type: "text", text: "Заполни анкету по этому резюме." }] },
+      ],
+      response_format: { type: "json_schema", json_schema: { name: "profile", strict: true, schema: PROFILE_JSON_SCHEMA } },
+      plugins: cv.kind === "pdf" ? [{ id: "file-parser", pdf: { engine: "pdf-text" } }] : undefined,
+    }),
   });
+  if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 500)}`);
 
-  if (response.stop_reason === "refusal") throw new ProfileExtractError("Не удалось разобрать резюме. Заполните анкету вручную.");
-  if (response.stop_reason === "max_tokens" || !response.parsed_output) {
-    throw new ProfileExtractError("Резюме разобралось не полностью. Проверьте анкету и допишите недостающее.");
+  const data = (await res.json()) as {
+    choices?: { message?: { content?: string | null }; finish_reason?: string }[];
+    error?: { message?: string };
+  };
+  if (data.error) throw new Error(`OpenRouter error: ${data.error.message ?? "unknown"}`);
+  const choice = data.choices?.[0];
+  const parsed = parseProfileJson(choice?.message?.content ?? "");
+  if (!parsed) {
+    if (choice?.finish_reason === "length") {
+      throw new ProfileExtractError("Резюме разобралось не полностью. Проверьте анкету и допишите недостающее.");
+    }
+    throw new ProfileExtractError("Не удалось разобрать резюме. Попробуйте ещё раз или заполните анкету вручную.");
   }
-  return response.parsed_output;
+  return parsed;
+}
+
+/** Достаёт JSON из ответа модели (бывает в ```json ...```), дополняет пропущенные поля и проверяет схемой. */
+export function parseProfileJson(content: string): Profile | null {
+  const start = content.indexOf("{");
+  const end = content.lastIndexOf("}");
+  if (start < 0 || end <= start) return null;
+  let raw: unknown;
+  try {
+    raw = JSON.parse(content.slice(start, end + 1));
+  } catch {
+    return null;
+  }
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+  const result = ProfileSchema.safeParse({
+    ...emptyProfile(),
+    ...obj,
+    contacts: { ...emptyProfile().contacts, ...((obj.contacts as object | null) ?? {}) },
+  });
+  return result.success ? result.data : null;
 }
 
 function toBase64(bytes: Uint8Array): string {
