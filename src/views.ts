@@ -3,6 +3,8 @@ import type { HtmlEscapedString } from "hono/utils/html";
 import type { User } from "./env";
 import type { SubscriptionRow } from "./lib/billing";
 import type { ResumeRow } from "./lib/cv";
+import type { MatchView } from "./lib/jobs/pipeline";
+import { hasFlag } from "./lib/jobs/text";
 import { EMPLOYMENT, SENIORITY, WORK_FORMATS, profileToForm, type StoredProfile } from "./lib/profile";
 
 type Html = HtmlEscapedString | Promise<HtmlEscapedString>;
@@ -81,6 +83,7 @@ export function dashboardPage(
   justPaid: boolean,
   profile: StoredProfile | null = null,
   resume: ResumeRow | null = null,
+  matchCount = 0,
 ) {
   let status: Html;
   if (active && sub) {
@@ -105,6 +108,12 @@ export function dashboardPage(
     html`<h1>Кабинет</h1>
       <p class="muted">${user.email}</p>
       <div class="card"><h2 style="margin-top:0">Резюме и анкета</h2>${profileSummary(profile, resume)}</div>
+      ${profile
+        ? html`<div class="card"><h2 style="margin-top:0">Подходящие вакансии</h2>
+            ${matchCount
+              ? html`<p>Нашли ${matchCount} по вашей анкете. <a href="/app/matches">Посмотреть</a></p>`
+              : html`<p class="muted">Подбираем вакансии по анкете, обычно это занимает до часа.</p>`}</div>`
+        : ""}
       <div class="card"><h2 style="margin-top:0">Подписка</h2>${status}</div>
       <form method="post" action="/auth/logout"><button class="link" type="submit">Выйти</button></form>`,
   );
@@ -284,5 +293,29 @@ export function profilePage(
             ${text("contact_website", "Сайт или портфолио", p?.contacts.website)}
             <button type="submit">Сохранить анкету</button>
           </form>`}`,
+  );
+}
+
+// --- Подходящие вакансии ---
+
+export function matchesPage(matches: MatchView[], active: boolean) {
+  const items = matches.map(
+    (m) => html`<div class="card" style="padding:16px 20px;margin:12px 0">
+      <div style="display:flex;justify-content:space-between;gap:12px;align-items:baseline">
+        <a href="${m.url}" target="_blank" rel="noopener noreferrer" style="font-weight:600">${m.title}</a>
+        <span class="muted" title="Насколько вакансия подходит по анкете">${m.score}</span>
+      </div>
+      <p class="muted" style="margin:4px 0 8px">${m.company}${m.location ? html` · ${m.location}` : ""}${hasFlag(m.flags, "CONTRACT") ? " · контракт" : ""}</p>
+      ${m.reasons.length ? html`<p class="hint" style="margin:0">${m.reasons.join(" · ")}</p>` : ""}
+      <form method="post" action="/app/matches/${m.seq}/hide"><button class="link" type="submit" style="font-size:14px">Не подходит</button></form>
+    </div>`,
+  );
+  return layout(
+    "Подходящие вакансии — Otklikator",
+    html`<p><a href="/app">← Кабинет</a></p>
+      <h1>Подходящие вакансии</h1>
+      <p class="muted">Подбираем по вашей анкете из открытых источников, список обновляется несколько раз в час.
+        ${active ? "" : html`Чтобы мы сами писали письма и откликались, <a href="/app">включите автопоиск</a>.`}</p>
+      ${matches.length ? items : html`<div class="card"><p class="muted">Пока ничего не нашли. Проверьте, что в <a href="/app/profile">анкете</a> указаны целевые роли и стек.</p></div>`}`,
   );
 }
