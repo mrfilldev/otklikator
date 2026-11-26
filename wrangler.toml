@@ -1,0 +1,45 @@
+name = "otklikator"
+main = "src/index.ts"
+compatibility_date = "2026-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Публичный адрес сайта: ссылки в письмах и redirect после Stripe Checkout.
+APP_URL = "https://otklikator.mrfilldev.workers.dev"
+# Price из Stripe Dashboard (test mode): recurring, €5 в неделю.
+STRIPE_PRICE_ID = "price_1Ug9rRRotwuJoz0Ia1savgC3"
+# Отправитель писем (onboarding@resend.dev работает без домена, но только на адрес владельца аккаунта Resend; для пользователей нужен свой домен).
+EMAIL_FROM = "Otklikator <onboarding@resend.dev>"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "otklikator"
+database_id = "6066b966-187e-4937-8a02-d23ec0ab8f0e"
+migrations_dir = "migrations"
+
+# Секреты (не в этом файле!):
+#   wrangler secret put STRIPE_SECRET_KEY
+#   wrangler secret put STRIPE_WEBHOOK_SECRET
+#   wrangler secret put RESEND_API_KEY
+# Локально — в .dev.vars (файл в .gitignore), пример в .dev.vars.example
+
+# ---------------------------------------------------------------------------
+# Прод: отдельный воркер, своя база, live-ключи Stripe.
+#   npx wrangler d1 create otklikator-prod        → database_id ниже
+#   npm run deploy:prod
+#   npx wrangler secret put STRIPE_SECRET_KEY --env production   (и остальные секреты)
+# Блок выше (без --env) — тестовая среда на test-ключах Stripe.
+[env.production]
+name = "otklikator-prod"
+routes = [{ pattern = "otklikator.app", custom_domain = true }]
+
+[env.production.vars]
+APP_URL = "https://otklikator.app"
+STRIPE_PRICE_ID = "price_1Ug9ktRotwuJoz0InOAXgnih"
+EMAIL_FROM = "Otklikator <noreply@otklikator.app>"  # домен подтверждается в Resend (DNS)
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "otklikator-prod"
+database_id = "01982939-adbc-487a-85f8-1ee217cfcdf5"
+migrations_dir = "migrations"
