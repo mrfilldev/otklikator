@@ -46,7 +46,17 @@ npm run typecheck
 
 Ключи никогда не коммитятся и не пересылаются в чат: только `wrangler secret put` и локальный `.dev.vars`.
 
-## Деплой
+## Деплой через Cloudflare Workers Builds (рекомендуется)
+
+Cloudflare сам собирает и деплоит воркер при каждом пуше в `main`, токены в GitHub не нужны.
+
+1. D1 → Create database `otklikator`; Database ID — в `database_id` в `wrangler.toml`.
+2. Workers & Pages → Create → Import a repository → `mrfilldev/otklikator`, ветка `main`,
+   Deploy command: `npm run deploy:cf` (сначала применяет миграции D1, потом деплоит).
+3. Настройки воркера → Variables and Secrets → тип Secret: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `RESEND_API_KEY`.
+4. `APP_URL` в `wrangler.toml` = адрес воркера (`https://otklikator.<subdomain>.workers.dev` или свой домен).
+
+## Деплой вручную
 
 ```sh
 npx wrangler d1 create otklikator      # id → database_id в wrangler.toml
