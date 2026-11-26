@@ -99,3 +99,11 @@ export function dashboardPage(user: User, sub: SubscriptionRow | null, active: b
       <form method="post" action="/auth/logout"><button class="link" type="submit">Выйти</button></form>`,
   );
 }
+
+export function errorPage() {
+  return layout(
+    "Ошибка — Otklikator",
+    html`<h1>Что-то пошло не так</h1>
+      <p>Мы уже видим ошибку в логах. Попробуйте ещё раз через минуту или <a href="/app">вернитесь в кабинет</a>.</p>`,
+  );
+}

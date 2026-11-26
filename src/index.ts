@@ -22,7 +22,7 @@ import {
   stripeClient,
 } from "./lib/billing";
 import { loginMail, sendMail } from "./lib/email";
-import { checkEmailPage, dashboardPage, invalidLinkPage, landingPage } from "./views";
+import { checkEmailPage, dashboardPage, errorPage, invalidLinkPage, landingPage } from "./views";
 
 const SESSION_COOKIE = "sid";
 
@@ -115,6 +115,12 @@ app.post("/stripe/webhook", async (c) => {
   }
   const result = await handleStripeEvent(c.env, stripe, event);
   return c.json({ received: true, result });
+});
+
+// Ошибки (в том числе Stripe) логируем целиком, человеку показываем понятную страницу.
+app.onError((err, c) => {
+  console.error(`[error] ${c.req.method} ${c.req.path}:`, err instanceof Error ? `${err.name}: ${err.message}` : err);
+  return c.html(errorPage(), 500);
 });
 
 export default app;
