@@ -6,8 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 # Публичный адрес сайта: ссылки в письмах и redirect после Stripe Checkout.
 APP_URL = "https://otklikator.mrfilldev.workers.dev"
-# Price из Stripe Dashboard: recurring, интервал week (сейчас $5 / неделю).
-STRIPE_PRICE_ID = "price_REPLACE_ME"
+# Price из Stripe Dashboard (test mode): recurring, €5 в неделю.
+STRIPE_PRICE_ID = "price_1Ug9rRRotwuJoz0Ia1savgC3"
 # Отправитель писем (onboarding@resend.dev работает без домена, но только на адрес владельца аккаунта Resend; для пользователей нужен свой домен).
 EMAIL_FROM = "Otklikator <onboarding@resend.dev>"
 
