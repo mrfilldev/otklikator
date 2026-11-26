@@ -40,5 +40,5 @@ EMAIL_FROM = "Otklikator <onboarding@resend.dev>"  # → noreply@<домен> п
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "otklikator-prod"
-database_id = "REPLACE_WITH_PROD_D1_ID"
+database_id = "01982939-adbc-487a-85f8-1ee217cfcdf5"
 migrations_dir = "migrations"
