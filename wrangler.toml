@@ -31,11 +31,12 @@ migrations_dir = "migrations"
 # Блок выше (без --env) — тестовая среда на test-ключах Stripe.
 [env.production]
 name = "otklikator-prod"
+routes = [{ pattern = "otklikator.app", custom_domain = true }]
 
 [env.production.vars]
-APP_URL = "https://otklikator-prod.mrfilldev.workers.dev"  # → свой домен, когда появится
+APP_URL = "https://otklikator.app"
 STRIPE_PRICE_ID = "price_1Ug9ktRotwuJoz0InOAXgnih"
-EMAIL_FROM = "Otklikator <onboarding@resend.dev>"  # → noreply@<домен> после подтверждения в Resend
+EMAIL_FROM = "Otklikator <noreply@otklikator.app>"  # домен подтверждается в Resend (DNS)
 
 [[env.production.d1_databases]]
 binding = "DB"
