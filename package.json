@@ -9,7 +9,8 @@
     "db:migrate:remote": "wrangler d1 migrations apply otklikator --remote",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "deploy:cf": "wrangler d1 migrations apply otklikator --remote && wrangler deploy"
+    "deploy:cf": "wrangler d1 migrations apply otklikator --remote && wrangler deploy",
+    "deploy:prod": "wrangler d1 migrations apply otklikator-prod --remote --env production && wrangler deploy --env production"
   },
   "dependencies": {
     "hono": "^4.13.22",

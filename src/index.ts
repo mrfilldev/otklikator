@@ -22,7 +22,7 @@ import {
   stripeClient,
 } from "./lib/billing";
 import { loginMail, sendMail } from "./lib/email";
-import { checkEmailPage, dashboardPage, errorPage, invalidLinkPage, landingPage } from "./views";
+import { checkEmailPage, dashboardPage, errorPage, invalidLinkPage, landingPage, privacyPage, termsPage } from "./views";
 
 const SESSION_COOKIE = "sid";
 
@@ -33,6 +33,9 @@ app.get("/", async (c) => {
   if (await userBySession(c.env.DB, getCookie(c, SESSION_COOKIE))) return c.redirect("/app");
   return c.html(landingPage());
 });
+
+app.get("/terms", (c) => c.html(termsPage()));
+app.get("/privacy", (c) => c.html(privacyPage()));
 
 app.post("/auth/start", async (c) => {
   const form = await c.req.parseBody();

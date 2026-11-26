@@ -62,4 +62,9 @@ describe("регистрация по email", () => {
     const after = await SELF.fetch(`${BASE}/app`, { headers: { cookie }, redirect: "manual" });
     expect(after.headers.get("location")).toBe("/");
   });
+
+  it("страницы условий и конфиденциальности открываются без входа", async () => {
+    expect((await SELF.fetch(`${BASE}/terms`)).status).toBe(200);
+    expect(await (await SELF.fetch(`${BASE}/privacy`)).text()).toContain("Stripe");
+  });
 });

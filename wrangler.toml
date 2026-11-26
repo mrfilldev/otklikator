@@ -22,3 +22,23 @@ migrations_dir = "migrations"
 #   wrangler secret put STRIPE_WEBHOOK_SECRET
 #   wrangler secret put RESEND_API_KEY
 # Локально — в .dev.vars (файл в .gitignore), пример в .dev.vars.example
+
+# ---------------------------------------------------------------------------
+# Прод: отдельный воркер, своя база, live-ключи Stripe.
+#   npx wrangler d1 create otklikator-prod        → database_id ниже
+#   npm run deploy:prod
+#   npx wrangler secret put STRIPE_SECRET_KEY --env production   (и остальные секреты)
+# Блок выше (без --env) — тестовая среда на test-ключах Stripe.
+[env.production]
+name = "otklikator-prod"
+
+[env.production.vars]
+APP_URL = "https://otklikator-prod.mrfilldev.workers.dev"  # → свой домен, когда появится
+STRIPE_PRICE_ID = "price_REPLACE_WITH_LIVE_PRICE"
+EMAIL_FROM = "Otklikator <onboarding@resend.dev>"  # → noreply@<домен> после подтверждения в Resend
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "otklikator-prod"
+database_id = "REPLACE_WITH_PROD_D1_ID"
+migrations_dir = "migrations"
