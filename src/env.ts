@@ -11,6 +11,8 @@ export interface Env {
   OPENROUTER_API_KEY?: string;
   /** Модель на OpenRouter для разбора CV, например z-ai/glm-5.3. */
   OPENROUTER_MODEL?: string;
+  /** Поддомен для писем-откликов через Resend (например apply.otklikator.app). Без него очередь не отправляется. */
+  APPLY_FROM_DOMAIN?: string;
 }
 
 export interface User {

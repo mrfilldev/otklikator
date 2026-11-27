@@ -24,8 +24,10 @@ import {
 import { CvError, latestResume, loadResume, readCv, storeResume } from "./lib/cv";
 import { loginMail, sendMail } from "./lib/email";
 import { hideMatch, listMatches, runJobsCron } from "./lib/jobs/pipeline";
+import { getSettings, runAutopilot, saveSettings } from "./lib/autopilot";
 import {
   DAILY_LETTER_LIMIT,
+  cancelQueued,
   LetterError,
   draftLetter,
   getApplication,
@@ -33,6 +35,7 @@ import {
   lettersToday,
   markSent,
   markSkipped,
+  queueApplication,
   recentCompanyApplication,
   saveDraft,
   updateDraft,
@@ -47,11 +50,13 @@ import {
   saveProfile,
 } from "./lib/profile";
 import {
+  type AutopilotItem,
   checkEmailPage,
   dashboardPage,
   errorPage,
   invalidLinkPage,
   landingPage,
+  autopilotPage,
   matchPage,
   matchesPage,
   privacyPage,
@@ -117,14 +122,15 @@ app.use("/billing/*", requireUser);
 
 app.get("/app", async (c) => {
   const user = c.get("user");
-  const [sub, active, profile, resume, matchCount] = await Promise.all([
+  const [sub, active, profile, resume, matchCount, autopilot] = await Promise.all([
     latestSubscription(c.env.DB, user.id),
     hasActiveSubscription(c.env.DB, user.id),
     getProfile(c.env.DB, user.id),
     latestResume(c.env.DB, user.id),
     c.env.DB.prepare("SELECT COUNT(*) AS n FROM matches WHERE user_id = ? AND status = 'new'").bind(user.id).first<{ n: number }>(),
+    getSettings(c.env.DB, user.id),
   ]);
-  return c.html(dashboardPage(user, sub, active, c.req.query("paid") === "1", profile, resume, matchCount?.n ?? 0));
+  return c.html(dashboardPage(user, sub, active, c.req.query("paid") === "1", profile, resume, matchCount?.n ?? 0, autopilot.enabled));
 });
 
 // --- Подходящие вакансии (подбор считает Cron, см. scheduled ниже) ---
@@ -201,6 +207,61 @@ app.post("/app/matches/:seq/sent", async (c) => {
   const seq = seqParam(c.req.param("seq"));
   if (seq) await markSent(c.env.DB, c.get("user").id, seq, "manual");
   return c.redirect(seq ? `/app/matches/${seq}` : "/app/matches", 303);
+});
+
+app.post("/app/matches/:seq/queue", async (c) => {
+  const user = c.get("user");
+  const seq = seqParam(c.req.param("seq"));
+  if (!seq) return c.redirect("/app/matches", 303);
+  if (await hasActiveSubscription(c.env.DB, user.id)) await queueApplication(c.env.DB, user.id, seq);
+  return c.redirect(`/app/matches/${seq}`, 303);
+});
+
+app.post("/app/matches/:seq/cancel", async (c) => {
+  const seq = seqParam(c.req.param("seq"));
+  if (seq) await cancelQueued(c.env.DB, c.get("user").id, seq);
+  const back = c.req.query("back") === "autopilot" ? "/app/autopilot" : `/app/matches/${seq}`;
+  return c.redirect(seq ? back : "/app/matches", 303);
+});
+
+// --- Автопилот: настройки и очередь ---
+
+app.get("/app/autopilot", async (c) => {
+  const user = c.get("user");
+  const [settings, active, profile, resume, apps] = await Promise.all([
+    getSettings(c.env.DB, user.id),
+    hasActiveSubscription(c.env.DB, user.id),
+    getProfile(c.env.DB, user.id),
+    latestResume(c.env.DB, user.id),
+    c.env.DB.prepare(
+      `SELECT a.vacancy_seq, a.status, a.to_email, a.scheduled_at, a.sent_at, a.source, a.send_error, v.title, v.company
+       FROM applications a JOIN vacancies v ON v.seq = a.vacancy_seq
+       WHERE a.user_id = ? AND (a.status IN ('queued', 'failed') OR (a.status = 'draft' AND a.source = 'autopilot') OR a.status = 'sent')
+       ORDER BY CASE a.status WHEN 'queued' THEN 0 WHEN 'failed' THEN 1 WHEN 'draft' THEN 2 ELSE 3 END, COALESCE(a.sent_at, a.scheduled_at, a.created_at) DESC
+       LIMIT 60`,
+    )
+      .bind(user.id)
+      .all<AutopilotItem>(),
+  ]);
+  return c.html(
+    autopilotPage(settings, active, { hasProfile: !!profile, hasCv: !!resume, sending: !!(c.env.RESEND_API_KEY && c.env.APPLY_FROM_DOMAIN) }, apps.results, c.req.query("saved") === "1"),
+  );
+});
+
+app.post("/app/autopilot", async (c) => {
+  const user = c.get("user");
+  const form = await c.req.parseBody();
+  const current = await getSettings(c.env.DB, user.id);
+  const n = (v: unknown, d: number) => (Number.isFinite(Number(v)) && String(v ?? "").trim() !== "" ? Number(v) : d);
+  // Быстрые кнопки «Включить» / «Пауза» меняют только enabled, полная форма — всё.
+  const quick = form.action === "enable" || form.action === "pause";
+  await saveSettings(c.env.DB, user.id, {
+    enabled: quick ? form.action === "enable" : form.enabled === "on",
+    review_window: quick ? current.review_window : form.review_window === "on",
+    daily_limit: quick ? current.daily_limit : n(form.daily_limit, current.daily_limit),
+    min_score: quick ? current.min_score : n(form.min_score, current.min_score),
+  });
+  return c.redirect("/app/autopilot?saved=1", 303);
 });
 
 app.post("/app/matches/:seq/skip", async (c) => {
@@ -332,6 +393,12 @@ export default {
   async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
     ctx.waitUntil(
       runJobsCron(env.DB, { notify: (mail) => sendMail(env, mail) }).catch((e) => console.error("[jobs] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
+    );
+    // Автопилот: отправка созревших писем, раз в сутки — отбор, черновики и отчёт.
+    ctx.waitUntil(
+      runAutopilot(env)
+        .then((r) => console.log(`[autopilot] sent=${r.sent} failed=${r.failed} waiting=${r.waiting} planned=${r.planned} queued=${r.queued} review=${r.review}`))
+        .catch((e) => console.error("[autopilot] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
     );
   },
 } satisfies ExportedHandler<Env>;
