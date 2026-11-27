@@ -12,6 +12,9 @@ STRIPE_PRICE_ID = "price_1Ug9rRRotwuJoz0Ia1savgC3"
 EMAIL_FROM = "Otklikator <onboarding@resend.dev>"
 # Модель на OpenRouter для автозаполнения анкеты по CV.
 OPENROUTER_MODEL = "z-ai/glm-5.3"
+# Письма-отклики автопилота уходят через Resend с этого поддомена (From: «Имя <имя@домен>», Reply-To — почта человека).
+# В тесте не задан: очередь копится, но не отправляется (sandbox Resend шлёт только владельцу аккаунта).
+# APPLY_FROM_DOMAIN = "apply.otklikator.app"
 
 [[d1_databases]]
 binding = "DB"
@@ -51,6 +54,8 @@ APP_URL = "https://otklikator.app"
 STRIPE_PRICE_ID = "price_1Ug9ktRotwuJoz0InOAXgnih"
 OPENROUTER_MODEL = "z-ai/glm-5.3"
 EMAIL_FROM = "Otklikator <noreply@otklikator.app>"  # домен подтверждается в Resend (DNS)
+# Отдельный поддомен для откликов, чтобы их репутация не влияла на письма входа. Подтвердить в Resend отдельно.
+APPLY_FROM_DOMAIN = "apply.otklikator.app"
 
 [[env.production.d1_databases]]
 binding = "DB"

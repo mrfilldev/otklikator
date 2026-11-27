@@ -11,6 +11,7 @@
 | R2 | `otklikator-cv` | `otklikator-cv-prod` |
 | Stripe | test mode, test-ключи | live mode, live-ключи; webhook на `https://otklikator.app/stripe/webhook` |
 | Отправитель писем | `onboarding@resend.dev` (работает только на адрес владельца аккаунта Resend) | `noreply@otklikator.app` (домен подтверждён в Resend) |
+| Отправитель откликов (`APPLY_FROM_DOMAIN`) | не задан — очередь не отправляется | `apply.otklikator.app` (поддомен нужно подтвердить в Resend отдельно: DNS в Cloudflare) |
 | Cron | `*/20 * * * *` | тот же (`[triggers]` наследуется в `[env.production]`) |
 
 Публичные переменные (`APP_URL`, `STRIPE_PRICE_ID`, `EMAIL_FROM`, `OPENROUTER_MODEL`) лежат в `wrangler.toml`
@@ -80,7 +81,7 @@ npx wrangler d1 migrations apply otklikator-prod --remote --env production
 ```
 
 Текущие миграции: `0001_init` (пользователи, вход, подписки), `0002_profile` (CV и анкета),
-`0003_vacancies` (вакансии, совпадения, журнал фидов), `0004_feed_sources` (расписание источников), `0005_applications` (письма-отклики).
+`0003_vacancies` (вакансии, совпадения, журнал фидов), `0004_feed_sources` (расписание источников), `0005_applications` (письма-отклики), `0006_autopilot` (автопилот и очередь отправки).
 
 ## Локальный запуск
 

@@ -5,6 +5,7 @@ import type { SubscriptionRow } from "./lib/billing";
 import type { ResumeRow } from "./lib/cv";
 import type { MatchView } from "./lib/jobs/pipeline";
 import { hasFlag } from "./lib/jobs/text";
+import { LIMITS, REVIEW_WINDOW_HOURS, localTime, type AutopilotSettings } from "./lib/autopilot";
 import { DAILY_LETTER_LIMIT, mailtoLink, type ApplicationRow, type MatchDetail } from "./lib/letters";
 import { EMPLOYMENT, SENIORITY, WORK_FORMATS, profileToForm, type StoredProfile } from "./lib/profile";
 
@@ -92,6 +93,7 @@ export function dashboardPage(
   profile: StoredProfile | null = null,
   resume: ResumeRow | null = null,
   matchCount = 0,
+  autopilotOn = false,
 ) {
   let status: Html;
   if (active && sub) {
@@ -121,6 +123,13 @@ export function dashboardPage(
             ${matchCount
               ? html`<p>Нашли ${matchCount} по вашей анкете. <a href="/app/matches">Посмотреть</a></p>`
               : html`<p class="muted">Подбираем вакансии по анкете, обычно это занимает до часа.</p>`}</div>`
+        : ""}
+      ${profile
+        ? html`<div class="card"><h2 style="margin-top:0">Автопилот</h2>
+            ${autopilotOn
+              ? html`<p class="ok">Включён: каждое утро сам пишет и отправляет отклики. <a href="/app/autopilot">Очередь и настройки</a></p>`
+              : html`<p>Система сама пишет письма лучшим вакансиям и отправляет их от вашего имени, ответы приходят вам на почту.</p>
+                  <p><a href="/app/autopilot">Включить автопилот</a></p>`}</div>`
         : ""}
       <div class="card"><h2 style="margin-top:0">Подписка</h2>${status}</div>
       <form method="post" action="/auth/logout"><button class="link" type="submit">Выйти</button></form>`,
@@ -433,12 +442,22 @@ export function matchPage(
   } else if (!a || a.status === "skipped") {
     letter = html`<div class="card"><p class="muted" style="margin:0">Напишем 3–4 предложения под эту вакансию по вашей анкете: деталь о компании, ваш кейс с цифрой, предложение созвониться.</p>
       ${generate("Написать письмо")}</div>`;
+  } else if (a.status === "queued") {
+    letter = html`<div class="card"><p class="ok" style="margin:0 0 8px">Письмо в очереди: уйдёт ${a.scheduled_at && a.scheduled_at > Date.now() / 1000 + 60 ? html`в ${localTime(a.scheduled_at)} по Кипру` : "в ближайшие 20 минут"} на ${a.to_email}.</p>
+      <form method="post" action="/app/matches/${m.seq}/application">
+        <input name="to_email" type="hidden" value="${a.to_email ?? ""}" />
+        <label for="subject">Тема</label><input id="subject" name="subject" type="text" value="${a.subject}" />
+        <label for="body">Письмо</label><textarea id="body" name="body" style="min-height:260px">${a.body}</textarea>
+        <button type="submit" style="background:var(--muted)">Сохранить правки</button>
+      </form>
+      <form method="post" action="/app/matches/${m.seq}/cancel"><button type="submit">Отменить отправку</button></form></div>`;
   } else if (a.status === "sent") {
-    letter = html`<div class="card"><p class="ok" style="margin:0 0 8px">✓ Отклик отправлен ${a.sent_at ? fmtDate(a.sent_at) : ""}${a.to_email ? html` на ${a.to_email}` : ""}</p>
+    letter = html`<div class="card"><p class="ok" style="margin:0 0 8px">✓ Отклик отправлен ${a.sent_at ? fmtDate(a.sent_at) : ""}${a.to_email ? html` на ${a.to_email}` : ""}${a.channel === "resend" ? " (автоматически, ответы придут вам на почту)" : ""}</p>
       <p style="margin:0 0 8px;font-weight:600">${a.subject}</p><p style="white-space:pre-wrap;margin:0">${a.body}</p></div>`;
   } else {
     letter = html`<div class="card">
       ${opts.saved ? html`<p class="ok">Сохранено.</p>` : ""}
+      ${a.status === "failed" ? html`<p class="warn">Не удалось отправить автоматически. Попробуйте ещё раз или отправьте из своей почты.</p>` : ""}
       ${unverified.length ? html`<p class="warn">Проверьте цифры ${unverified.join(", ")}: их нет ни в анкете, ни в вакансии.</p>` : ""}
       <form method="post" action="/app/matches/${m.seq}/application">
         <label for="to_email">Кому</label>
@@ -453,8 +472,12 @@ export function matchPage(
       <p style="margin:16px 0 0">
         ${a.to_email ? html`<a href="${mailtoLink(a)}">Открыть в почте</a> · ` : ""}<a href="${m.url}" target="_blank" rel="noopener noreferrer">Страница вакансии</a>
       </p>
-      <p class="hint" style="margin:4px 0 0">Отправка с вашего Gmail в один клик появится позже. Пока — из своей почты или через форму на сайте; CV можно <a href="/app/cv">скачать здесь</a>.</p>
-      <form method="post" action="/app/matches/${m.seq}/sent"><button type="submit">Я отправил(а)</button></form>
+      ${a.to_email
+        ? html`<form method="post" action="/app/matches/${m.seq}/queue"><button type="submit">Отправить</button></form>
+            <p class="hint" style="margin:4px 0 0">Уйдёт от вашего имени с CV во вложении, ответ придёт вам на почту.</p>`
+        : ""}
+      <p class="hint" style="margin:8px 0 0">Отправили сами из своей почты или через форму на сайте (CV можно <a href="/app/cv">скачать здесь</a>)? Отметьте:</p>
+      <form method="post" action="/app/matches/${m.seq}/sent"><button type="submit" style="background:var(--muted)">Я отправил(а)</button></form>
       <div style="display:flex;gap:16px;margin-top:12px">
         <form method="post" action="/app/matches/${m.seq}/letter"><button class="link" type="submit" style="font-size:14px">Написать заново</button></form>
         <form method="post" action="/app/matches/${m.seq}/skip"><button class="link" type="submit" style="font-size:14px">Пропустить вакансию</button></form>
@@ -473,5 +496,87 @@ export function matchPage(
       ${error ? html`<p class="warn">${error}</p>` : ""}
       ${letter}
       ${m.description ? html`<details><summary class="muted">Текст вакансии</summary><p style="white-space:pre-wrap;font-size:15px">${m.description}</p></details>` : ""}`,
+  );
+}
+
+export interface AutopilotItem {
+  vacancy_seq: number;
+  status: string;
+  to_email: string | null;
+  scheduled_at: number | null;
+  sent_at: number | null;
+  source: string;
+  send_error: string | null;
+  title: string;
+  company: string;
+}
+
+export function autopilotPage(
+  s: AutopilotSettings,
+  active: boolean,
+  ready: { hasProfile: boolean; hasCv: boolean; sending: boolean },
+  items: AutopilotItem[],
+  saved: boolean,
+) {
+  const blockers = [
+    !active ? html`<li>нужна подписка — <a href="/app">включить</a></li>` : "",
+    !ready.hasProfile ? html`<li>заполните <a href="/app/profile">анкету</a></li>` : "",
+    !ready.hasCv ? html`<li>загрузите <a href="/app/profile">CV</a> — оно уйдёт во вложении</li>` : "",
+    !ready.sending ? html`<li>отправка писем на этом сервере ещё не настроена</li>` : "",
+  ].filter(Boolean);
+  const status = s.enabled
+    ? html`<p class="ok" style="margin:0">Автопилот включён. Каждое утро после 07:00 (Кипр) выбираем до ${s.daily_limit} вакансий с баллом от ${s.min_score},
+        пишем письма и ${s.review_window ? `отправляем через ${REVIEW_WINDOW_HOURS} часа — за это время можно отменить` : "сразу отправляем"}. Отчёт приходит на почту.</p>
+        <form method="post" action="/app/autopilot"><input type="hidden" name="action" value="pause" /><button type="submit" style="background:var(--muted)">Поставить на паузу</button></form>`
+    : html`<p style="margin:0">Автопилот выключен. Включите — и система сама будет писать и отправлять отклики от вашего имени
+        (с нашего адреса, ответы работодателей придут вам на почту).</p>
+        <form method="post" action="/app/autopilot"><input type="hidden" name="action" value="enable" /><button type="submit">Включить автопилот</button></form>`;
+
+  const row = (i: AutopilotItem) => {
+    const when =
+      i.status === "queued"
+        ? html`уйдёт ${i.scheduled_at && i.scheduled_at > Date.now() / 1000 + 60 ? html`в ${localTime(i.scheduled_at)}` : "скоро"}`
+        : i.status === "sent"
+          ? html`<span class="ok">отправлено ${i.sent_at ? fmtDate(i.sent_at) : ""}</span>`
+          : i.status === "failed"
+            ? html`<span class="warn">не отправилось</span>`
+            : html`<span class="warn">ждёт проверки</span>`;
+    return html`<div style="display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--line)">
+      <div><a href="/app/matches/${i.vacancy_seq}">${i.title}</a><div class="hint">${i.company}${i.to_email ? html` · ${i.to_email}` : ""} · ${when}</div></div>
+      ${i.status === "queued"
+        ? html`<form method="post" action="/app/matches/${i.vacancy_seq}/cancel?back=autopilot"><button class="link" type="submit" style="font-size:14px">Отменить</button></form>`
+        : ""}
+    </div>`;
+  };
+
+  return layout(
+    "Автопилот — Otklikator",
+    html`<p><a href="/app">← Кабинет</a></p>
+      <h1>Автопилот</h1>
+      ${saved ? html`<p class="ok">Сохранено.</p>` : ""}
+      ${blockers.length ? html`<div class="card"><p class="warn" style="margin:0 0 8px">Чтобы автопилот заработал:</p><ul style="margin:0">${blockers}</ul></div>` : ""}
+      <div class="card">${status}</div>
+      <div class="card">
+        <h2 style="margin-top:0">Очередь и отправленное</h2>
+        ${items.length ? items.map(row) : html`<p class="muted" style="margin:0">Пока пусто. Письма появятся после утреннего отбора.</p>`}
+        <p class="hint" style="margin:12px 0 0">Пишем только туда, где в вакансии есть адрес для отклика. Не чаще раза в две недели в одну компанию.
+          Письма, где модель вписала цифры не из анкеты, сами не уходят — ждут вашей проверки.</p>
+      </div>
+      <div class="card">
+        <h2 style="margin-top:0">Настройки</h2>
+        <form method="post" action="/app/autopilot">
+          <div class="checks">
+            <label><input type="checkbox" name="enabled" ${s.enabled ? "checked" : ""} /> Автопилот включён</label>
+            <label><input type="checkbox" name="review_window" ${s.review_window ? "checked" : ""} /> Окно отмены ${REVIEW_WINDOW_HOURS} часа перед отправкой</label>
+          </div>
+          <div class="row">
+            <div><label for="daily_limit">Писем в день <span class="hint">${LIMITS.dailyMin}–${LIMITS.dailyMax}</span></label>
+              <input id="daily_limit" name="daily_limit" type="number" min="${LIMITS.dailyMin}" max="${LIMITS.dailyMax}" value="${s.daily_limit}" /></div>
+            <div><label for="min_score">Минимальный балл <span class="hint">${LIMITS.scoreMin}–${LIMITS.scoreMax}</span></label>
+              <input id="min_score" name="min_score" type="number" min="${LIMITS.scoreMin}" max="${LIMITS.scoreMax}" value="${s.min_score}" /></div>
+          </div>
+          <button type="submit">Сохранить</button>
+        </form>
+      </div>`,
   );
 }

@@ -182,51 +182,72 @@ export interface ApplicationRow {
   to_email: string | null;
   subject: string;
   body: string;
-  status: "draft" | "sent" | "skipped";
+  status: "draft" | "queued" | "sent" | "skipped" | "failed";
   channel: string | null;
   model: string | null;
   unverified: string;
   created_at: number;
   updated_at: number;
   sent_at: number | null;
+  scheduled_at: number | null;
+  source: "manual" | "autopilot";
+  attempts: number;
+  send_error: string | null;
+  message_id: string | null;
+  reported_at: number | null;
 }
 
 export function getApplication(db: D1Database, userId: string, seq: number) {
   return db.prepare("SELECT * FROM applications WHERE user_id = ? AND vacancy_seq = ?").bind(userId, seq).first<ApplicationRow>();
 }
 
-/** Сохраняет новый черновик. Отправленный отклик не трогаем. */
-export async function saveDraft(db: D1Database, userId: string, v: MatchDetail, d: LetterDraft, ts = now()): Promise<void> {
+/**
+ * Сохраняет новый черновик (или, для автопилота, сразу письмо в очередь). Отправленный отклик не трогаем.
+ * opts.scheduledAt задан — письмо встаёт в очередь (status = queued) и уйдёт не раньше этого времени.
+ */
+export async function saveDraft(
+  db: D1Database,
+  userId: string,
+  v: MatchDetail,
+  d: LetterDraft,
+  ts = now(),
+  opts: { scheduledAt?: number; source?: "manual" | "autopilot"; toEmail?: string | null } = {},
+): Promise<void> {
+  const status = opts.scheduledAt === undefined ? "draft" : "queued";
+  const to = opts.toEmail === undefined ? findApplyEmail(v.description) : opts.toEmail;
   await db
     .prepare(
-      `INSERT INTO applications (user_id, vacancy_seq, company_key, to_email, subject, body, status, model, unverified, created_at, updated_at)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'draft', ?7, ?8, ?9, ?9)
-       ON CONFLICT(user_id, vacancy_seq) DO UPDATE SET subject = excluded.subject, body = excluded.body, status = 'draft',
+      `INSERT INTO applications (user_id, vacancy_seq, company_key, to_email, subject, body, status, model, unverified, created_at, updated_at, scheduled_at, source)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?10, ?7, ?8, ?9, ?9, ?11, ?12)
+       ON CONFLICT(user_id, vacancy_seq) DO UPDATE SET subject = excluded.subject, body = excluded.body, status = excluded.status,
          model = excluded.model, unverified = excluded.unverified, created_at = excluded.created_at, updated_at = excluded.updated_at,
-         to_email = COALESCE(applications.to_email, excluded.to_email)
+         scheduled_at = excluded.scheduled_at, to_email = COALESCE(applications.to_email, excluded.to_email)
        WHERE applications.status != 'sent'`,
     )
-    .bind(userId, v.seq, companyKey(v.company), findApplyEmail(v.description), d.subject, d.body, d.model, JSON.stringify(d.unverified), ts)
+    .bind(userId, v.seq, companyKey(v.company), to, d.subject, d.body, d.model, JSON.stringify(d.unverified), ts, status, opts.scheduledAt ?? null, opts.source ?? "manual")
     .run();
 }
 
-/** Правки человека: адрес, тема, текст. Только у черновика. */
+/** Правки человека: адрес, тема, текст. У черновика и у письма в очереди. */
 export async function updateDraft(db: D1Database, userId: string, seq: number, f: { to_email: string | null; subject: string; body: string }) {
   await db
     .prepare(
       `UPDATE applications SET to_email = ?, subject = ?, body = ?, unverified = '[]', updated_at = ?
-       WHERE user_id = ? AND vacancy_seq = ? AND status = 'draft'`,
+       WHERE user_id = ? AND vacancy_seq = ? AND status IN ('draft', 'queued')`,
     )
     .bind(f.to_email, f.subject, f.body, now(), userId, seq)
     .run();
 }
 
-/** Человек отправил письмо сам (или позже — через Gmail). Совпадение переходит в applied. */
-export async function markSent(db: D1Database, userId: string, seq: number, channel: "manual" | "gmail", ts = now()) {
+/** Письмо ушло: человек отправил сам, через Resend или (позже) через Gmail. Совпадение переходит в applied. */
+export async function markSent(db: D1Database, userId: string, seq: number, channel: "manual" | "resend" | "gmail", ts = now(), messageId: string | null = null) {
   await db.batch([
     db
-      .prepare("UPDATE applications SET status = 'sent', channel = ?, sent_at = ?, updated_at = ? WHERE user_id = ? AND vacancy_seq = ? AND status = 'draft'")
-      .bind(channel, ts, ts, userId, seq),
+      .prepare(
+        `UPDATE applications SET status = 'sent', channel = ?, sent_at = ?, updated_at = ?, message_id = ?, send_error = NULL
+         WHERE user_id = ? AND vacancy_seq = ? AND status IN ('draft', 'queued', 'failed')`,
+      )
+      .bind(channel, ts, ts, messageId, userId, seq),
     db.prepare("UPDATE matches SET status = 'applied' WHERE user_id = ? AND vacancy_seq = ?").bind(userId, seq),
   ]);
 }
@@ -234,9 +255,30 @@ export async function markSent(db: D1Database, userId: string, seq: number, chan
 /** «Пропустить»: черновик в skipped, вакансия скрывается из подбора. */
 export async function markSkipped(db: D1Database, userId: string, seq: number, ts = now()) {
   await db.batch([
-    db.prepare("UPDATE applications SET status = 'skipped', updated_at = ? WHERE user_id = ? AND vacancy_seq = ? AND status = 'draft'").bind(ts, userId, seq),
+    db
+      .prepare("UPDATE applications SET status = 'skipped', updated_at = ? WHERE user_id = ? AND vacancy_seq = ? AND status IN ('draft', 'queued', 'failed')")
+      .bind(ts, userId, seq),
     db.prepare("UPDATE matches SET status = 'hidden' WHERE user_id = ? AND vacancy_seq = ? AND status = 'new'").bind(userId, seq),
   ]);
+}
+
+/** Поставить черновик в очередь на отправку через Resend (нужен адрес). Уйдёт в ближайший запуск Cron. */
+export async function queueApplication(db: D1Database, userId: string, seq: number, ts = now()) {
+  await db
+    .prepare(
+      `UPDATE applications SET status = 'queued', scheduled_at = ?, attempts = 0, send_error = NULL, updated_at = ?
+       WHERE user_id = ? AND vacancy_seq = ? AND status IN ('draft', 'failed') AND to_email IS NOT NULL`,
+    )
+    .bind(ts, ts, userId, seq)
+    .run();
+}
+
+/** Отменить отправку: письмо из очереди возвращается в черновики, автопилот его больше не трогает. */
+export async function cancelQueued(db: D1Database, userId: string, seq: number, ts = now()) {
+  await db
+    .prepare("UPDATE applications SET status = 'draft', scheduled_at = NULL, updated_at = ? WHERE user_id = ? AND vacancy_seq = ? AND status = 'queued'")
+    .bind(ts, userId, seq)
+    .run();
 }
 
 /** Отклик в ту же компанию за последние две недели (по другой вакансии), если был. */
