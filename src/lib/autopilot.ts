@@ -13,6 +13,7 @@ import {
   saveDraft,
   type ApplicationRow,
 } from "./letters";
+import { applyEmailFor, companyEmails } from "./finder";
 import { getProfile, type Profile } from "./profile";
 
 /**
@@ -118,10 +119,12 @@ export async function pickCandidates(db: D1Database, userId: string, minScore: n
       .all<{ company_key: string }>(),
   ]);
   const taken = new Set(recent.results.map((r) => r.company_key));
+  // Адрес из текста вакансии или найденный на сайте компании (finder.ts).
+  const found = await companyEmails(db, rows.results.map((r) => r.company));
   const out: Candidate[] = [];
   for (const r of rows.results) {
     const key = companyKey(r.company);
-    if (taken.has(key) || !findApplyEmail(r.description)) continue;
+    if (taken.has(key) || !(findApplyEmail(r.description) ?? found.get(key))) continue;
     taken.add(key);
     out.push(r);
     if (out.length >= limit) break;
@@ -155,12 +158,13 @@ export async function planUser(env: Env, userId: string, s: AutopilotSettings, t
     if (!match) continue;
     try {
       const draft = await draftLetter(env, profile.profile, match);
+      const toEmail = await applyEmailFor(env.DB, match);
       if (draft.unverified.length) {
         // Модель дважды вписала цифры, которых нет в данных: само такое не отправляем, ждём человека.
-        await saveDraft(env.DB, userId, match, draft, ts, { source: "autopilot" });
+        await saveDraft(env.DB, userId, match, draft, ts, { source: "autopilot", toEmail });
         res.review++;
       } else {
-        await saveDraft(env.DB, userId, match, draft, ts, { source: "autopilot", scheduledAt });
+        await saveDraft(env.DB, userId, match, draft, ts, { source: "autopilot", scheduledAt, toEmail });
         res.queued++;
       }
     } catch (e) {

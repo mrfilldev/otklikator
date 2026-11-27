@@ -37,6 +37,7 @@ bucket_name = "otklikator-cv"
 #   wrangler secret put STRIPE_WEBHOOK_SECRET
 #   wrangler secret put RESEND_API_KEY
 #   wrangler secret put OPENROUTER_API_KEY   (автозаполнение анкеты по CV)
+#   wrangler secret put HUNTER_API_KEY       (необязательно: поиск адреса компании через Hunter.io)
 # Локально — в .dev.vars (файл в .gitignore), пример в .dev.vars.example
 
 # ---------------------------------------------------------------------------

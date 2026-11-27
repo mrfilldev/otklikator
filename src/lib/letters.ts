@@ -49,9 +49,11 @@ export function companyKey(company: string): string {
   return fingerprint(company, "").split("|")[0];
 }
 
-const EMAIL_RX = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi;
+export const EMAIL_RX = /[a-z0-9._%+-]+@[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}/gi;
 const BAD_EMAIL =
   /^(no-?reply|do-?not-?reply|donotreply|privacy|gdpr|dpo|legal|abuse|security|support|help|info@.*sentry|unsubscribe|billing|press|media|accessibility)@|@(example\.(com|org|net)|sentry\.io|.*wixpress\.com)$|\.(png|jpe?g|gif|svg|webp)$/i;
+/** Адреса, на которые отклик не шлём: noreply, privacy, support, картинки и т.п. */
+export const isJunkEmail = (email: string) => BAD_EMAIL.test(email);
 const GOOD_LOCAL = /^(jobs?|careers?|hr|hiring|recruit\w*|talent|apply|cv|resumes?|people|work|team|vacanc\w*)@/i;
 const APPLY_NEAR = /apply|send|cv|resume|résumé|reach out|email us|contact|write to|отклик|резюме|пишите|присылайте|направляйте/i;
 

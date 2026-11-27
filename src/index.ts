@@ -25,6 +25,7 @@ import { CvError, latestResume, loadResume, readCv, storeResume } from "./lib/cv
 import { loginMail, sendMail } from "./lib/email";
 import { hideMatch, listMatches, runJobsCron } from "./lib/jobs/pipeline";
 import { getSettings, runAutopilot, saveSettings } from "./lib/autopilot";
+import { applyEmailFor, runFinder } from "./lib/finder";
 import {
   DAILY_LETTER_LIMIT,
   cancelQueued,
@@ -181,7 +182,8 @@ app.post("/app/matches/:seq/letter", async (c) => {
   const profile = await getProfile(c.env.DB, user.id);
   if (!profile) return c.redirect("/app/profile", 303);
   try {
-    await saveDraft(c.env.DB, user.id, match, await draftLetter(c.env, profile.profile, match));
+    const draft = await draftLetter(c.env, profile.profile, match);
+    await saveDraft(c.env.DB, user.id, match, draft, undefined, { toEmail: await applyEmailFor(c.env.DB, match) });
   } catch (e) {
     if (!(e instanceof LetterError)) console.error("[letters] draft failed:", e instanceof Error ? `${e.name}: ${e.message}` : e);
     return back("?error=draft");
@@ -398,6 +400,9 @@ export default {
     ctx.waitUntil(
       runAutopilot(env)
         .then((r) => console.log(`[autopilot] sent=${r.sent} failed=${r.failed} waiting=${r.waiting} planned=${r.planned} queued=${r.queued} review=${r.review}`))
+        // Поиск адресов компаний для будущих откликов (несколько компаний за запуск).
+        .then(() => runFinder(env))
+        .then((f) => console.log(`[finder] looked=${f.looked} found=${f.found}`))
         .catch((e) => console.error("[autopilot] cron failed:", e instanceof Error ? `${e.name}: ${e.message}` : e)),
     );
   },

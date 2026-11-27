@@ -13,6 +13,8 @@ export interface Env {
   OPENROUTER_MODEL?: string;
   /** Поддомен для писем-откликов через Resend (например apply.otklikator.app). Без него очередь не отправляется. */
   APPLY_FROM_DOMAIN?: string;
+  /** Необязательно: Hunter.io для поиска адреса компании, если на её сайте адреса нет. */
+  HUNTER_API_KEY?: string;
 }
 
 export interface User {
